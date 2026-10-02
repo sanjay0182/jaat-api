@@ -99,6 +99,8 @@ async function handle(req, env) {
     try { j = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
     const wantStream = j.stream === true;
     j.stream = false; delete j.stream_options; j.model = "auto";
+    // vireonix cache todne ke liye har request me alag random note
+    j.messages = [{ role: "system", content: "ref " + crypto.randomUUID().slice(0, 8) }, ...(j.messages || [])];
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(j) });
     if (!wantStream || r.status !== 200) return r;
