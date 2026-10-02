@@ -10,8 +10,8 @@ const IDLE_MS = 15 * 60e3;
 // vireonix kabhi 5s me, kabhi 50s me jawab deta hai.
 // 12s me jawab na aaye to wahi request dobara bhejo, jo pehle de wahi lo.
 const URL_UP = "https://vireonix.ai/v1/chat/completions";
-const HEDGE_MS = 12000;
-const MAX_TRIES = 2;
+const HEDGE_MS = 6000;
+const MAX_TRIES = 3;
 
 const start = Date.now();
 let dispatched = false;
