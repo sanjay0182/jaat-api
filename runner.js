@@ -48,12 +48,12 @@ function callUpstream(body) {
     const text = await u.text();
     let ok = false;
     try { ok = u.ok && !!JSON.parse(text).choices; } catch {}
-    if (!ok) throw new Error("bad " + u.status);
+    if (!ok) throw new Error("upstream " + u.status + ": " + text.slice(0, 300));
     return text;
   };
 
   return new Promise((resolve, reject) => {
-    let started = 0, failed = 0, done = false, timer;
+    let started = 0, failed = 0, done = false, timer, lastErr = "";
     const launch = () => {
       if (done || started >= MAX_TRIES) return;
       clearTimeout(timer);
@@ -65,11 +65,12 @@ function callUpstream(body) {
         done = true; clearTimeout(timer);
         ctrls.forEach((x) => x.abort());
         resolve({ text, n });
-      }).catch(() => {
+      }).catch((e) => {
         if (done) return;
+        lastErr = String((e && e.message) || e);
         failed++;
         if (started < MAX_TRIES) launch();          // fail hua to turant dusri try
-        else if (failed >= started) { done = true; reject(new Error("all failed")); }
+        else if (failed >= started) { done = true; reject(new Error(lastErr || "all failed")); }
       });
       if (started < MAX_TRIES) timer = setTimeout(launch, HEDGE_MS); // der ho rahi to dusri try
     };
@@ -85,7 +86,10 @@ async function handle({ id, body }) {
   try {
     const r = await callUpstream(body);
     data = r.text; tries = r.n;
-  } catch { data = JSON.stringify({ error: "upstream failed" }); }
+  } catch (e) {
+    console.log("upstream error:", e.message);
+    data = JSON.stringify({ error: String(e.message || "upstream failed") });
+  }
   const ms = Date.now() - t0;
   console.log("upstream ms:", ms, "winner try:", tries);
   try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; o._jaat_try = tries; data = JSON.stringify(o); } catch {}
