@@ -10,8 +10,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - run: node runner.js
+      - name: runner chalao (saath me purane runs saaf)
         env:
           WORKER: ${{ secrets.WORKER }}
           RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # peeche background me: sabse naye 10 chhodkar baaki poore ho chuke runs delete
+          ( gh api "repos/${{ github.repository }}/actions/runs?status=completed&per_page=100" \
+              --jq '.workflow_runs[10:][].id' \
+            | xargs -r -I{} gh api -X DELETE "repos/${{ github.repository }}/actions/runs/{}" ) >/dev/null 2>&1 &
+          node runner.js
