@@ -1,0 +1,17 @@
+name: run
+on: workflow_dispatch
+permissions:
+  actions: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - run: node runner.js
+        env:
+          WORKER: ${{ secrets.WORKER }}
+          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
