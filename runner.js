@@ -7,6 +7,12 @@ const RUN_MS = 3 * 60e3;
 const NEXT_AT_MS = 2 * 60e3;
 const IDLE_MS = 15 * 60e3;
 
+// vireonix kabhi 5s me, kabhi 50s me jawab deta hai.
+// 12s me jawab na aaye to wahi request dobara bhejo, jo pehle de wahi lo.
+const URL_UP = "https://vireonix.ai/v1/chat/completions";
+const HEDGE_MS = 12000;
+const MAX_TRIES = 2;
+
 const start = Date.now();
 let dispatched = false;
 let inflight = 0;
@@ -30,22 +36,59 @@ async function dispatchNext() {
   } catch {}
 }
 
+function callUpstream(body) {
+  const ctrls = [];
+  const attempt = async (c) => {
+    const u = await fetch(URL_UP, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "*/*", "user-agent": "curl/8.5.0" },
+      body,
+      signal: c.signal,
+    });
+    const text = await u.text();
+    let ok = false;
+    try { ok = u.ok && !!JSON.parse(text).choices; } catch {}
+    if (!ok) throw new Error("bad " + u.status);
+    return text;
+  };
+
+  return new Promise((resolve, reject) => {
+    let started = 0, failed = 0, done = false, timer;
+    const launch = () => {
+      if (done || started >= MAX_TRIES) return;
+      clearTimeout(timer);
+      const n = ++started;
+      const c = new AbortController();
+      ctrls.push(c);
+      attempt(c).then((text) => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        ctrls.forEach((x) => x.abort());
+        resolve({ text, n });
+      }).catch(() => {
+        if (done) return;
+        failed++;
+        if (started < MAX_TRIES) launch();          // fail hua to turant dusri try
+        else if (failed >= started) { done = true; reject(new Error("all failed")); }
+      });
+      if (started < MAX_TRIES) timer = setTimeout(launch, HEDGE_MS); // der ho rahi to dusri try
+    };
+    launch();
+  });
+}
+
 // Har request alag chalti hai: loop turant agli request sun'ne lagta hai
 async function handle({ id, body }) {
   inflight++;
   const t0 = Date.now();
-  let data;
+  let data, tries = 0;
   try {
-    const u = await fetch("https://vireonix.ai/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "*/*", "user-agent": "curl/8.5.0" },
-      body,
-    });
-    data = await u.text();
+    const r = await callUpstream(body);
+    data = r.text; tries = r.n;
   } catch { data = JSON.stringify({ error: "upstream failed" }); }
   const ms = Date.now() - t0;
-  console.log("upstream ms:", ms);
-  try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; data = JSON.stringify(o); } catch {}
+  console.log("upstream ms:", ms, "winner try:", tries);
+  try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; o._jaat_try = tries; data = JSON.stringify(o); } catch {}
   try {
     await fetch(W + "/result", {
       method: "POST", headers: { ...H, "content-type": "application/json" },
