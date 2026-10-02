@@ -68,20 +68,68 @@ export class Hub {
   }
 }
 
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "authorization,content-type",
+  "access-control-allow-methods": "GET,POST,OPTIONS",
+};
+const withCors = (r) => {
+  const h = new Headers(r.headers);
+  for (const k in CORS) h.set(k, CORS[k]);
+  return new Response(r.body, { status: r.status, headers: h });
+};
+
+async function handle(req, env) {
+  const u = new URL(req.url);
+  const hub = env.HUB.get(env.HUB.idFromName("hub"));
+  const auth = (req.headers.get("authorization") || "").replace("Bearer ", "");
+  const isUser = env.USER_KEYS.split(",").includes(auth);
+
+  if (u.pathname === "/v1/models") {
+    if (!isUser) return new Response("unauthorized", { status: 401 });
+    return Response.json({
+      object: "list",
+      data: [{ id: "jaat-default", object: "model", created: 0, owned_by: "jaat" }],
+    });
+  }
+
+  if (u.pathname === "/v1/chat/completions") {
+    if (!isUser) return new Response("unauthorized", { status: 401 });
+    let j;
+    try { j = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
+    const wantStream = j.stream === true;
+    j.stream = false; delete j.stream_options; j.model = "auto";
+
+    const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(j) });
+    if (!wantStream || r.status !== 200) return r;
+
+    const d = await r.json();
+    const c = d.choices && d.choices[0];
+    if (!c) return Response.json(d);
+    const base = {
+      id: d.id || "chatcmpl-" + crypto.randomUUID(),
+      object: "chat.completion.chunk",
+      created: d.created || Math.floor(Date.now() / 1000),
+      model: "jaat-default",
+    };
+    const ev = (x) => "data: " + JSON.stringify({ ...base, ...x }) + "\n\n";
+    const body =
+      ev({ choices: [{ index: 0, delta: { role: "assistant", content: (c.message && c.message.content) || "" }, finish_reason: null }] }) +
+      ev({ choices: [{ index: 0, delta: {}, finish_reason: c.finish_reason || "stop" }] }) +
+      "data: [DONE]\n\n";
+    return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+  }
+
+  if (["/next", "/result", "/status"].includes(u.pathname)) {
+    if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
+    return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
+  }
+  return new Response("ok");
+}
+
 export default {
   async fetch(req, env) {
-    const u = new URL(req.url);
-    const hub = env.HUB.get(env.HUB.idFromName("hub"));
-    const auth = (req.headers.get("authorization") || "").replace("Bearer ", "");
-
-    if (u.pathname === "/v1/chat/completions") {
-      if (!env.USER_KEYS.split(",").includes(auth)) return new Response("unauthorized", { status: 401 });
-      return hub.fetch("https://hub/submit", { method: "POST", body: await req.text() });
-    }
-    if (["/next", "/result", "/status"].includes(u.pathname)) {
-      if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
-      return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
-    }
-    return new Response("ok");
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    return withCors(await handle(req, env));
   },
 };
