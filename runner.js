@@ -43,11 +43,15 @@ while (true) {
 
   const { id, body } = await r.json();
   let data;
+  const t0 = Date.now();
   try {
     const u = await fetch("https://vireonix.ai/v1/chat/completions", {
       method: "POST", headers: { "content-type": "application/json" }, body });
     data = await u.text();
   } catch { data = JSON.stringify({ error: "upstream failed" }); }
+  const ms = Date.now() - t0;
+  console.log("upstream ms:", ms);
+  try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; data = JSON.stringify(o); } catch {}
 
   await fetch(W + "/result", {
     method: "POST", headers: { ...H, "content-type": "application/json" },
