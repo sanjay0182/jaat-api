@@ -32,7 +32,7 @@ export class Hub {
         } catch {}
       }
 
-      const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), 90000))]);
+      const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), 190000))]);
       this.waiters.delete(id);
       return out
         ? new Response(out, { headers: { "content-type": "application/json" } })
