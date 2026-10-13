@@ -76,7 +76,7 @@ export class Hub {
         setTimeout(() => {
           const i = this.pollers.indexOf(res);
           if (i > -1) { this.pollers.splice(i, 1); res(new Response(null, { status: 204 })); }
-        }, 5000);
+        }, 15000);
       });
     }
 
@@ -125,12 +125,12 @@ export class Hub {
       this.pollers.shift()(Response.json(this.lease(this.queue.shift())));
   }
 
-  // job runner ko diya; 5s me ack na aaye (runner mar chuka tha) to wapas queue me
+  // job runner ko diya; 4s me ack na aaye (runner mar chuka tha) to wapas queue me
   lease(job) {
     const timer = setTimeout(() => {
       if (!this.leased.delete(job.id)) return;
       if (this.waiters.has(job.id)) { this.queue.unshift(job); this.flush(); }
-    }, 5000);
+    }, 4000);
     this.leased.set(job.id, timer);
     return job;
   }
