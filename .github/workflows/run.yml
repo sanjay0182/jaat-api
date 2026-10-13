@@ -5,7 +5,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,9 +18,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # repo Variable (Settings -> Variables): DUCK_HEADED=1 ho to chrome xvfb me headed chalega
           DUCK_HEADED: ${{ vars.DUCK_HEADED }}
-          # ek run ab 30s tak chalta hai, 15s par agla run dispatch ho jata hai (chaining)
-          RUN_MS: 30000
-          NEXT_AT_MS: 15000
         run: |
           # peeche background me: sabse naye 10 chhodkar baaki poore ho chuke runs delete
           ( gh api "repos/${{ github.repository }}/actions/runs?status=completed&per_page=100" \
