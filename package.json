@@ -1,0 +1,9 @@
+{
+  "name": "jaat-api",
+  "private": true,
+  "type": "module",
+  "description": "OpenAI-compatible API: Cloudflare Worker + GitHub Actions relay (jaat/vireonix + duck.ai)",
+  "dependencies": {
+    "playwright-core": "^1.56.0"
+  }
+}

@@ -1,8 +1,20 @@
+// runner ka jawab fail maana jaye: null (timeout) ya {error} bina choices ke
+function failed(out) {
+  if (!out) return true;
+  try { const o = JSON.parse(out); return !!o.error && !o.choices; } catch { return true; }
+}
+
+const DUCK_MODELS = [
+  "duck-auto", "gpt-5.6-luna", "gpt-5.4-mini", "claude-haiku-4-5",
+  "mistral-small-2603", "tinfoil/gpt-oss-120b", "tinfoil/gemma4-31b",
+];
+const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUCK_MODELS.includes(m));
+
 export class Hub {
   constructor(state, env) {
     this.state = state; this.env = env;
     this.queue = []; this.pollers = []; this.waiters = new Map();
-    this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0;
+    this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0; this.duckBadUntil = 0;
     state.blockConcurrencyWhile(async () => {
       this.lastRequest = (await state.storage.get("lastRequest")) || 0;
     });
@@ -12,31 +24,32 @@ export class Hub {
     const p = new URL(req.url).pathname;
 
     if (p === "/submit") {
-      const id = crypto.randomUUID();
-      const done = new Promise(r => this.waiters.set(id, r));
+      // body: { provider: "jaat" | "duck", body: <json string>, fallback: <json string> (sirf duck ke liye) }
+      const job = await req.json();
       this.lastRequest = Date.now();
       await this.state.storage.put("lastRequest", this.lastRequest);
-      this.queue.push({ id, body: await req.text() });
-      this.flush();
 
-      // koi runner nahi sun raha -> naya run start karo
-      const now = Date.now();
-      if (now - this.lastSeen > 40000 && now - this.lastDispatch > 60000) {
-        this.lastDispatch = now;
-        try {
-          await fetch(`https://api.github.com/repos/${this.env.GH_REPO}/actions/workflows/run.yml/dispatches`, {
-            method: "POST",
-            headers: { authorization: "Bearer " + this.env.GH_PAT, accept: "application/vnd.github+json", "user-agent": "hub" },
-            body: JSON.stringify({ ref: "main" }),
-          });
-        } catch {}
+      let provider = job.provider === "duck" ? "duck" : "jaat";
+      let body = job.body;
+      const fb = job.fallback; // duck fail ho to is body se jaat chalega
+      const useFallback = fb && (this.env.DUCK_FALLBACK || "1") !== "0";
+      const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 120000);
+      const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
+
+      // duck abhi-abhi fail hua tha -> seedha jaat (har request par duck ka intezaar nahi)
+      if (provider === "duck" && useFallback && Date.now() < this.duckBadUntil) { provider = "jaat"; body = fb; }
+
+      let out = await this.run(provider, body, provider === "duck" ? duckWait : 180000);
+
+      if (provider === "duck" && failed(out)) {
+        this.duckBadUntil = Date.now() + cooldown;
+        if (useFallback) { provider = "jaat"; out = await this.run("jaat", fb, 180000); }
       }
 
-      const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), 180000))]);
-      this.waiters.delete(id);
+      const headers = { "content-type": "application/json", "x-jaat-provider": provider };
       return out
-        ? new Response(out, { headers: { "content-type": "application/json" } })
-        : new Response('{"error":"timeout"}', { status: 504 });
+        ? new Response(out, { headers })
+        : new Response('{"error":"timeout"}', { status: 504, headers });
     }
 
     if (p === "/next") {
@@ -60,6 +73,32 @@ export class Hub {
     if (p === "/status") return Response.json({ lastRequest: this.lastRequest });
 
     return new Response("not found", { status: 404 });
+  }
+
+  // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
+  async run(provider, body, waitMs) {
+    const id = crypto.randomUUID();
+    const done = new Promise(r => this.waiters.set(id, r));
+    this.queue.push({ id, provider, body });
+    this.flush();
+
+    // koi runner nahi sun raha -> naya run start karo
+    const now = Date.now();
+    if (now - this.lastSeen > 40000 && now - this.lastDispatch > 60000) {
+      this.lastDispatch = now;
+      try {
+        await fetch(`https://api.github.com/repos/${this.env.GH_REPO}/actions/workflows/run.yml/dispatches`, {
+          method: "POST",
+          headers: { authorization: "Bearer " + this.env.GH_PAT, accept: "application/vnd.github+json", "user-agent": "hub" },
+          body: JSON.stringify({ ref: "main" }),
+        });
+      } catch {}
+    }
+
+    const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), waitMs))]);
+    this.waiters.delete(id);
+    if (out === null) { const i = this.queue.findIndex(j => j.id === id); if (i > -1) this.queue.splice(i, 1); }
+    return out;
   }
 
   flush() {
@@ -89,7 +128,10 @@ async function handle(req, env) {
     if (!isUser) return new Response("unauthorized", { status: 401 });
     return Response.json({
       object: "list",
-      data: [{ id: "jaat-default", object: "model", created: 0, owned_by: "jaat" }],
+      data: [
+        { id: "jaat-default", object: "model", created: 0, owned_by: "jaat" },
+        ...DUCK_MODELS.map(id => ({ id, object: "model", created: 0, owned_by: "duck.ai" })),
+      ],
     });
   }
 
@@ -98,11 +140,21 @@ async function handle(req, env) {
     let j;
     try { j = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
     const wantStream = j.stream === true;
-    j.stream = false; delete j.stream_options; j.model = "auto";
-    // vireonix cache todne ke liye har request me alag random note
-    j.messages = [{ role: "system", content: "ref " + crypto.randomUUID().slice(0, 8) }, ...(j.messages || [])];
+    const duck = isDuckModel(j.model);
+    const shownModel = duck ? j.model : "jaat-default";
+    j.stream = false; delete j.stream_options;
 
-    const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(j) });
+    // jaat (vireonix) wali body: model "auto" + cache todne ke liye random note
+    const jaatBody = () => {
+      const k = { ...j, model: "auto" };
+      k.messages = [{ role: "system", content: "ref " + crypto.randomUUID().slice(0, 8) }, ...(j.messages || [])];
+      return JSON.stringify(k);
+    };
+    const job = duck
+      ? { provider: "duck", body: JSON.stringify({ model: j.model, messages: j.messages || [] }), fallback: jaatBody() }
+      : { provider: "jaat", body: jaatBody() };
+
+    const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
     if (!wantStream || r.status !== 200) return r;
 
     const d = await r.json();
@@ -112,14 +164,14 @@ async function handle(req, env) {
       id: d.id || "chatcmpl-" + crypto.randomUUID(),
       object: "chat.completion.chunk",
       created: d.created || Math.floor(Date.now() / 1000),
-      model: "jaat-default",
+      model: shownModel,
     };
     const ev = (x) => "data: " + JSON.stringify({ ...base, ...x }) + "\n\n";
     const body =
       ev({ choices: [{ index: 0, delta: { role: "assistant", content: (c.message && c.message.content) || "" }, finish_reason: null }] }) +
       ev({ choices: [{ index: 0, delta: {}, finish_reason: c.finish_reason || "stop" }] }) +
       "data: [DONE]\n\n";
-    return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+    return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "" } });
   }
 
   if (["/next", "/result", "/status"].includes(u.pathname)) {

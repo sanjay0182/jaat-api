@@ -1,17 +1,23 @@
 // Har run ~3 min chalta hai. Agle run ko 2 min par start karta hai (overlap),
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
+import { DuckClient } from "./duck.js";
+
 const W = process.env.WORKER;
 const H = { authorization: "Bearer " + process.env.RUNNER_SECRET };
 
-const RUN_MS = 3 * 60e3;
+const RUN_MS = Number(process.env.RUN_MS || 3 * 60e3);
 const NEXT_AT_MS = 2 * 60e3;
 const IDLE_MS = 15 * 60e3;
 
 // vireonix kabhi 5s me, kabhi 50s me jawab deta hai.
 // 12s me jawab na aaye to wahi request dobara bhejo, jo pehle de wahi lo.
-const URL_UP = "https://vireonix.ai/v1/chat/completions";
+const URL_UP = process.env.JAAT_UPSTREAM || "https://vireonix.ai/v1/chat/completions";
 const HEDGE_MS = 10000;
 const MAX_TRIES = 1; // 1 = normal mode, ek request ke liye vireonix ko sirf ek call
+
+// duck.ai provider (real Chrome). Pehli duck request par hi chrome khulta hai.
+const duck = new DuckClient();
+const DUCK_TIMEOUT_MS = Number(process.env.DUCK_TIMEOUT_MS || 80000);
 
 const start = Date.now();
 let dispatched = false;
@@ -79,19 +85,24 @@ function callUpstream(body) {
 }
 
 // Har request alag chalti hai: loop turant agli request sun'ne lagta hai
-async function handle({ id, body }) {
+async function handle({ id, provider, body }) {
   inflight++;
   const t0 = Date.now();
   let data, tries = 0;
   try {
-    const r = await callUpstream(body);
-    data = r.text; tries = r.n;
+    if (provider === "duck") {
+      const j = JSON.parse(body);
+      data = await duck.chat({ model: j.model, messages: j.messages }, DUCK_TIMEOUT_MS);
+    } else {
+      const r = await callUpstream(body);
+      data = r.text; tries = r.n;
+    }
   } catch (e) {
-    console.log("upstream error:", e.message);
-    data = JSON.stringify({ error: String(e.message || "upstream failed") });
+    console.log(provider === "duck" ? "duck error:" : "upstream error:", e.message);
+    data = JSON.stringify({ error: String(e.message || "upstream failed"), _jaat_kind: e.kind || "error" });
   }
   const ms = Date.now() - t0;
-  console.log("upstream ms:", ms, "winner try:", tries);
+  console.log(provider || "jaat", "ms:", ms, "winner try:", tries);
   try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; o._jaat_try = tries; data = JSON.stringify(o); } catch {}
   try {
     await fetch(W + "/result", {
@@ -119,4 +130,5 @@ while (true) {
 
 // chal rahi requests poori hone do, phir band
 while (inflight > 0) await sleep(200);
+await duck.close();
 process.exit(0);
