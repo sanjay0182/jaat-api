@@ -4,6 +4,13 @@ function failed(out) {
   try { const o = JSON.parse(out); return !!o.error && !o.choices; } catch { return true; }
 }
 
+// fail hue duck jawab se error message + kind nikalo (header me daalne layak saaf text)
+function errInfo(out) {
+  let msg = "timeout", kind = "timeout";
+  if (out) { try { const o = JSON.parse(out); msg = String(o.error || "error"); kind = o._jaat_kind || "error"; } catch { msg = "bad response"; kind = "error"; } }
+  return { msg: msg.replace(/[^\x20-\x7e]/g, " ").slice(0, 160), kind };
+}
+
 const DUCK_MODELS = [
   "duck-auto", "gpt-5.6-luna", "gpt-5.4-mini", "claude-haiku-4-5",
   "mistral-small-2603", "tinfoil/gpt-oss-120b", "tinfoil/gemma4-31b",
@@ -14,7 +21,7 @@ export class Hub {
   constructor(state, env) {
     this.state = state; this.env = env;
     this.queue = []; this.pollers = []; this.waiters = new Map();
-    this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0; this.duckBadUntil = 0;
+    this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0; this.duckBadUntil = 0; this.duckBadModel = new Map();
     state.blockConcurrencyWhile(async () => {
       this.lastRequest = (await state.storage.get("lastRequest")) || 0;
     });
@@ -31,22 +38,31 @@ export class Hub {
 
       let provider = job.provider === "duck" ? "duck" : "jaat";
       let body = job.body;
+      const model = String(job.model || "");
       const fb = job.fallback; // duck fail ho to is body se jaat chalega
       const useFallback = fb && (this.env.DUCK_FALLBACK || "1") !== "0";
       const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 120000);
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
+      const extra = {};
 
-      // duck abhi-abhi fail hua tha -> seedha jaat (har request par duck ka intezaar nahi)
-      if (provider === "duck" && useFallback && Date.now() < this.duckBadUntil) { provider = "jaat"; body = fb; }
+      // duck abhi-abhi fail hua tha -> seedha jaat (har request par duck ka intezaar nahi).
+      // Ban poore duck ka cooldown banata hai; baaki error sirf usi model ka.
+      if (provider === "duck" && useFallback &&
+          (Date.now() < this.duckBadUntil || Date.now() < (this.duckBadModel.get(model) || 0))) {
+        provider = "jaat"; body = fb; extra["x-jaat-duck-skipped"] = "cooldown";
+      }
 
       let out = await this.run(provider, body, provider === "duck" ? duckWait : 180000);
 
       if (provider === "duck" && failed(out)) {
-        this.duckBadUntil = Date.now() + cooldown;
+        const e = errInfo(out);
+        if (e.kind === "ban") this.duckBadUntil = Date.now() + cooldown;
+        else this.duckBadModel.set(model, Date.now() + cooldown);
+        extra["x-jaat-duck-error"] = e.msg;
         if (useFallback) { provider = "jaat"; out = await this.run("jaat", fb, 180000); }
       }
 
-      const headers = { "content-type": "application/json", "x-jaat-provider": provider };
+      const headers = { "content-type": "application/json", "x-jaat-provider": provider, ...extra };
       return out
         ? new Response(out, { headers })
         : new Response('{"error":"timeout"}', { status: 504, headers });
@@ -151,7 +167,7 @@ async function handle(req, env) {
       return JSON.stringify(k);
     };
     const job = duck
-      ? { provider: "duck", body: JSON.stringify({ model: j.model, messages: j.messages || [] }), fallback: jaatBody() }
+      ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }), fallback: jaatBody() }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
@@ -171,7 +187,7 @@ async function handle(req, env) {
       ev({ choices: [{ index: 0, delta: { role: "assistant", content: (c.message && c.message.content) || "" }, finish_reason: null }] }) +
       ev({ choices: [{ index: 0, delta: {}, finish_reason: c.finish_reason || "stop" }] }) +
       "data: [DONE]\n\n";
-    return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "" } });
+    return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "", "x-jaat-duck-error": r.headers.get("x-jaat-duck-error") || "", "x-jaat-duck-skipped": r.headers.get("x-jaat-duck-skipped") || "" } });
   }
 
   if (["/next", "/result", "/status"].includes(u.pathname)) {
