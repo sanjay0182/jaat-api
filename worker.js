@@ -20,7 +20,7 @@ const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUC
 export class Hub {
   constructor(state, env) {
     this.state = state; this.env = env;
-    this.queue = []; this.pollers = []; this.waiters = new Map();
+    this.queue = []; this.pollers = []; this.waiters = new Map(); this.leased = new Map();
     this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0; this.duckBadUntil = 0; this.duckBadModel = new Map();
     state.blockConcurrencyWhile(async () => {
       this.lastRequest = (await state.storage.get("lastRequest")) || 0;
@@ -70,7 +70,7 @@ export class Hub {
 
     if (p === "/next") {
       this.lastSeen = Date.now();
-      if (this.queue.length) return Response.json(this.queue.shift());
+      if (this.queue.length) return Response.json(this.lease(this.queue.shift()));
       return new Promise(res => {
         this.pollers.push(res);
         setTimeout(() => {
@@ -82,9 +82,12 @@ export class Hub {
 
     if (p === "/result") {
       const { id, data } = await req.json();
+      this.unlease(id);
       this.waiters.get(id)?.(data);
       return new Response("ok");
     }
+
+    if (p === "/ack") { const { id } = await req.json(); this.unlease(id); return new Response("ok"); }
 
     if (p === "/status") return Response.json({ lastRequest: this.lastRequest });
 
@@ -119,8 +122,19 @@ export class Hub {
 
   flush() {
     while (this.queue.length && this.pollers.length)
-      this.pollers.shift()(Response.json(this.queue.shift()));
+      this.pollers.shift()(Response.json(this.lease(this.queue.shift())));
   }
+
+  // job runner ko diya; 4s me ack na aaye (runner mar chuka tha) to wapas queue me
+  lease(job) {
+    const timer = setTimeout(() => {
+      if (!this.leased.delete(job.id)) return;
+      if (this.waiters.has(job.id)) { this.queue.unshift(job); this.flush(); }
+    }, 4000);
+    this.leased.set(job.id, timer);
+    return job;
+  }
+  unlease(id) { clearTimeout(this.leased.get(id)); this.leased.delete(id); }
 }
 
 const CORS = {
@@ -190,7 +204,7 @@ async function handle(req, env) {
     return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "", "x-jaat-duck-error": r.headers.get("x-jaat-duck-error") || "", "x-jaat-duck-skipped": r.headers.get("x-jaat-duck-skipped") || "" } });
   }
 
-  if (["/next", "/result", "/status"].includes(u.pathname)) {
+  if (["/next", "/result", "/ack", "/status"].includes(u.pathname)) {
     if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
     return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
   }

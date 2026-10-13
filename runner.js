@@ -86,7 +86,8 @@ function callUpstream(body) {
 
 // Har request alag chalti hai: loop turant agli request sun'ne lagta hai
 async function handle({ id, provider, body }) {
-  inflight++;
+  // job milte hi worker ko ack (nahi to worker 4s baad job dusre runner ko de deta hai)
+  fetch(W + "/ack", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id }) }).catch(() => {});
   const t0 = Date.now();
   let data, tries = 0;
   try {
@@ -110,7 +111,6 @@ async function handle({ id, provider, body }) {
       body: JSON.stringify({ id, data }),
     });
   } catch {}
-  inflight--;
 }
 
 while (true) {
@@ -125,7 +125,8 @@ while (true) {
   let r;
   try { r = await fetch(W + "/next", { headers: H }); } catch { await sleep(1000); continue; }
   if (r.status !== 200) continue;
-  r.json().then(handle).catch(() => {});
+  inflight++; // turant, json parse se pehle: nahi to runner job leke exit ho sakta hai
+  r.json().then(handle).catch(() => {}).finally(() => { inflight--; });
 }
 
 // chal rahi requests poori hone do, phir band
