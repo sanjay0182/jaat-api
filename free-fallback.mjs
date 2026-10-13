@@ -38,9 +38,9 @@ export const PROVIDERS = [
   { name: "vlm-diffgemma", base: "https://gateway.vlm.run/v1/openai", model: "google/diffusiongemma-26b-a4b-it" },
   // ---- Mumbai (21.py) ke providers, har model alag. GROQ, GEM3, DSX jaan-boojh ke nahi liye ----
   // keyDefault = seedha key (jaise 21.py me thi) | keyEnv = chahe to GitHub Secret se badal sakte ho | timeout = ms
-  { name: "gem-flash-3.7", base: "https://gimmni.blitz.cloud/v1", model: "gemini-3.7-flash", keyDefault: "sk-jaat", timeout: 150000 },
-  { name: "gem2-flash-3.6", base: "https://gemini.jaatbahi76.workers.dev/v1", model: "gemini-3.6-flash@think=0", keyDefault: "sk-jaat", timeout: 150000 },
-  { name: "gem2-flash-3.5", base: "https://gemini.jaatbahi76.workers.dev/v1", model: "gemini-3.5-flash", keyDefault: "sk-jaat", timeout: 150000 },
+  { name: "gem-flash-3.7", base: "https://gimmni.blitz.cloud/v1", model: "gemini-3.7-flash", keyDefault: "sk-gemini", timeout: 150000 },
+  { name: "gem2-flash-3.6", base: "https://gemini.jaatbahi76.workers.dev/v1", model: "gemini-3.6-flash@think=0", keyDefault: "sk-gemini", timeout: 150000 },
+  { name: "gem2-flash-3.5", base: "https://gemini.jaatbahi76.workers.dev/v1", model: "gemini-3.5-flash", keyDefault: "sk-gemini", timeout: 150000 },
   { name: "rev-mimo26", base: "https://rev9.top/v1", model: "mimo-v2.6-flash:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
   { name: "rev-mimo25", base: "https://rev9.top/v1", model: "mimo-v2.5:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
   { name: "rev-dsf41", base: "https://rev9.top/v1", model: "deepseek-v4.1-flash:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
