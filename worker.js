@@ -181,7 +181,7 @@ async function handle(req, env) {
       return JSON.stringify(k);
     };
     const job = duck
-      ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }), fallback: jaatBody() }
+      ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }), fallback: jaatBody() }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });

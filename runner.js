@@ -93,7 +93,7 @@ async function handle({ id, provider, body }) {
   try {
     if (provider === "duck") {
       const j = JSON.parse(body);
-      data = await duck.chat({ model: j.model, messages: j.messages }, DUCK_TIMEOUT_MS);
+      data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort }, DUCK_TIMEOUT_MS);
     } else {
       const r = await callUpstream(body);
       data = r.text; tries = r.n;

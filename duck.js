@@ -105,6 +105,7 @@ window.__duckai = {chunks:[], done:false, err:null, status:0, rewrite:null, rewr
         try{
           const j = JSON.parse(o.body);
           if(rw.model) j.model = rw.model;
+          if(rw.reasoningEffort) j.reasoningEffort = rw.reasoningEffort;
           o = Object.assign({}, o, {body: JSON.stringify(j)});
           D.rewriteApplied = true;
         }catch(e){}
@@ -217,7 +218,7 @@ export class DuckClient {
   }
 
   // messages (OpenAI style) -> OpenAI chat.completion JSON string
-  async chat({ model, messages }, timeoutMs = 80000) {
+  async chat({ model, messages, reasoning_effort }, timeoutMs = 80000) {
     await this.ensure();
     await this.slot();
     const id = ++this.n;
@@ -226,7 +227,10 @@ export class DuckClient {
       const wantModel = resolveModel(model);
       let text;
       try {
-        text = await this.#send(id, flatten(messages), timeoutMs, wantModel !== DEFAULT_MODEL && this.rewriteOk ? { model: wantModel } : null);
+        const rw = {};
+        if (wantModel !== DEFAULT_MODEL) rw.model = wantModel;
+        if (reasoning_effort) rw.reasoningEffort = String(reasoning_effort); // duck.ai body field: reasoningEffort
+        text = await this.#send(id, flatten(messages), timeoutMs, this.rewriteOk && Object.keys(rw).length ? rw : null);
       } catch (e) {
         if (e.kind === "rewrite") { // body badalne par challenge fail -> bina badle default model se
           this.rewriteOk = false;
