@@ -104,8 +104,10 @@ window.__duckai = {chunks:[], done:false, err:null, status:0, rewrite:null, rewr
       if(rw && typeof o.body === 'string'){
         try{
           const j = JSON.parse(o.body);
+          D.sent = {model:j.model, reasoningEffort:j.reasoningEffort, keys:Object.keys(j)};
           if(rw.model) j.model = rw.model;
           if(rw.reasoningEffort) j.reasoningEffort = rw.reasoningEffort;
+          D.final = {model:j.model, reasoningEffort:j.reasoningEffort};
           o = Object.assign({}, o, {body: JSON.stringify(j)});
           D.rewriteApplied = true;
         }catch(e){}
@@ -136,7 +138,7 @@ window.__duckai = {chunks:[], done:false, err:null, status:0, rewrite:null, rewr
 const RESET_JS = (rw) => { window.__duckai = { chunks: [], done: false, err: null, status: 0, rewrite: rw, rewriteApplied: false }; };
 const POLL_JS = (n) => {
   const D = window.__duckai || { chunks: [], done: false, err: null, status: 0 };
-  return { n: D.chunks.length, text: D.chunks.slice(n).join(""), done: D.done, err: D.err, status: D.status, rw: !!D.rewriteApplied };
+  return { sent: D.sent || null, final: D.final || null, n: D.chunks.length, text: D.chunks.slice(n).join(""), done: D.done, err: D.err, status: D.status, rw: !!D.rewriteApplied };
 };
 
 function parseLine(line) {
@@ -240,6 +242,7 @@ export class DuckClient {
       }
       const plen = JSON.stringify(messages || "").length;
       return JSON.stringify({
+        _jaat_sent: this.lastSent || null,
         id: "chatcmpl-" + Math.random().toString(36).slice(2) + Date.now().toString(36),
         object: "chat.completion",
         created: Math.floor(Date.now() / 1000),
@@ -284,6 +287,7 @@ export class DuckClient {
       while (Date.now() < deadline) {
         const st = await page.evaluate(POLL_JS, idx);
         idx = st.n;
+        if (st.sent) this.lastSent = { page_default: st.sent, we_sent: st.final };
         if (st.err || (st.status && st.status !== 200)) {
           const err = classify((st.err || "") + st.text, st.status);
           if (err.kind === "challenge" && st.rw) throw new DuckError("rewrite rejected", "rewrite");

@@ -176,7 +176,7 @@ async function handle(req, env) {
 
     // jaat (vireonix) wali body: model "auto" + cache todne ke liye random note
     const jaatBody = () => {
-      const k = { ...j, model: "auto" };
+      const k = { ...j, model: "auto" }; delete k.reasoning_effort; delete k.reasoningEffort; // duck-only field
       k.messages = [{ role: "system", content: "ref " + crypto.randomUUID().slice(0, 8) }, ...(j.messages || [])];
       return JSON.stringify(k);
     };
