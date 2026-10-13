@@ -2,6 +2,7 @@
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
 import { DuckClient } from "./duck.js";
 import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
+import { callFree } from "./free-call.mjs";
 
 const W = process.env.WORKER;
 const H = { authorization: "Bearer " + process.env.RUNNER_SECRET };
@@ -85,32 +86,7 @@ function callUpstream(body) {
   });
 }
 
-// "free" provider: model naam se free-fallback.mjs ki list me se wahi provider dhoondo
-// aur seedha usi ko ek baar call karo (koi chain/fallback nahi, duck jaisa direct hit)
-const FREE_TIMEOUT_MS = Number(process.env.FREE_TIMEOUT_MS || 60000);
-async function callFree(name, body, timeoutMs = FREE_TIMEOUT_MS) {
-  const p = FREE_PROVIDERS.find((x) => x.name === name);
-  if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
-  const base = typeof body === "string" ? JSON.parse(body) : body;
-  const b = { ...base, model: p.model, stream: false };
-  delete b.stream_options; delete b.reasoning_effort;
-  const headers = { "content-type": "application/json" };
-  if (p.key) headers.authorization = "Bearer " + p.key;
-  const c = new AbortController();
-  const t = setTimeout(() => c.abort(), timeoutMs);
-  try {
-    const r = await fetch(p.base + "/chat/completions", { method: "POST", headers, body: JSON.stringify(b), signal: c.signal });
-    const text = await r.text();
-    let ok = false;
-    try { ok = r.ok && !!JSON.parse(text).choices; } catch {}
-    if (!ok) throw new Error("free " + name + " " + r.status + ": " + text.slice(0, 200));
-    return text;
-  } catch (e) {
-    throw e.name === "AbortError" ? new Error("free " + name + " timeout") : e;
-  } finally {
-    clearTimeout(t);
-  }
-}
+const FREE_TIMEOUT_MS = Number(process.env.FREE_TIMEOUT_MS || 60000); // provider me "timeout" ho to wahi chalta hai
 
 // Har request alag chalti hai: loop turant agli request sun'ne lagta hai
 async function handle({ id, provider, name, body }) {
@@ -123,7 +99,9 @@ async function handle({ id, provider, name, body }) {
       const j = JSON.parse(body);
       data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort }, DUCK_TIMEOUT_MS);
     } else if (provider === "free") {
-      data = await callFree(name, body);
+      const p = FREE_PROVIDERS.find((x) => x.name === name);
+      if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
+      data = await callFree(p, body, p.timeout || FREE_TIMEOUT_MS);
     } else {
       const r = await callUpstream(body);
       data = r.text; tries = r.n;

@@ -36,9 +36,38 @@ export const PROVIDERS = [
   { name: "vlm-qwen27b", base: "https://gateway.vlm.run/v1/openai", model: "qwen/qwen3.8-27b" },
   { name: "vlm-qwen08b", base: "https://gateway.vlm.run/v1/openai", model: "qwen/qwen3.5-0.8b" },
   { name: "vlm-diffgemma", base: "https://gateway.vlm.run/v1/openai", model: "google/diffusiongemma-26b-a4b-it" },
+  // ---- Mumbai (21.py) ke providers, har model alag. GROQ, GEM3, DSX jaan-boojh ke nahi liye ----
+  // keyDefault = seedha key (jaise 21.py me thi) | keyEnv = chahe to GitHub Secret se badal sakte ho | timeout = ms
+  { name: "gem-flash-3.7", base: "https://gimmni.blitz.cloud/v1", model: "gemini-3.7-flash", keyDefault: "sk-jaat", timeout: 150000 },
+  { name: "gem2-flash-3.6", base: "https://gemini.jaatbahi76.workers.dev/v1", model: "gemini-3.6-flash@think=0", keyDefault: "sk-jaat", timeout: 150000 },
+  { name: "gem2-flash-3.5", base: "https://gemini.jaatbahi76.workers.dev/v1", model: "gemini-3.5-flash", keyDefault: "sk-jaat", timeout: 150000 },
+  { name: "rev-mimo26", base: "https://rev9.top/v1", model: "mimo-v2.6-flash:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
+  { name: "rev-mimo25", base: "https://rev9.top/v1", model: "mimo-v2.5:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
+  { name: "rev-dsf41", base: "https://rev9.top/v1", model: "deepseek-v4.1-flash:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
+  { name: "rev-dsf4", base: "https://rev9.top/v1", model: "deepseek-v4-flash:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
+  { name: "rev-haiku", base: "https://rev9.top/v1", model: "claude-haiku-5.5:free", keyEnv: "REV_KEY", keyDefault: "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4", timeout: 120000 },
+  { name: "rev-grok-4.7", base: "https://rev9.top/v1", model: "grok-4.7", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-4.6", base: "https://rev9.top/v1", model: "grok-4.6", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-4.5-latest", base: "https://rev9.top/v1", model: "grok-4.5-latest", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-4.5", base: "https://rev9.top/v1", model: "grok-4.5", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-latest", base: "https://rev9.top/v1", model: "grok-latest", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok", base: "https://rev9.top/v1", model: "grok", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-build", base: "https://rev9.top/v1", model: "grok-build-latest", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-composer", base: "https://rev9.top/v1", model: "grok-composer", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-composer-2.5", base: "https://rev9.top/v1", model: "composer-2.5", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-grok-composer-fast", base: "https://rev9.top/v1", model: "grok-composer-2.5-fast", keyEnv: "REV_GROK_KEY", keyDefault: "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE", timeout: 120000 },
+  { name: "rev-dspro", base: "https://rev9.top/v1", model: "DeepSeek-V4-Pro", keyEnv: "REV_PRO_KEY", keyDefault: "mgw_YmoeQVZ6XUtrX37SZaSgDK9ilvHbOU3AY0STJW6aXSA", timeout: 120000 },
+  { name: "rev-kimi", base: "https://rev9.top/v1", model: "Kimi-K2.7-Code", keyEnv: "REV_PRO_KEY", keyDefault: "mgw_YmoeQVZ6XUtrX37SZaSgDK9ilvHbOU3AY0STJW6aXSA", timeout: 120000 },
+  { name: "rev-luna", base: "https://rev9.top/v1", model: "gpt-6-luna", keyEnv: "REV_LUNA_KEY", keyDefault: "mgw_3wMuei0b6wQdaH5GgNNjoTWoWcmNM7K55AmDWOI3Fxs", timeout: 120000 },
+  { name: "ds-flash", type: "proxy_get", base: "https://anshapi.vercel.app/api/deepseek", model: "deepseek-v4-flash", maxChars: 6500 },
+  { name: "dai-standard", type: "deepai", base: "https://api.deepai.org/hacking_is_a_serious_crime", model: "standard", keyEnv: "DAI_KEY", keyDefault: "tryit-8803332334-5329fed31418c18274ac106f280207f3", maxChars: 3000 },
+  { name: "uai-reasoning", type: "uai", base: "https://app.unlimitedai.chat/api/chat", model: "chat-model-reasoning", maxChars: 6000, timeout: 150000 },
   // naya jodne ka namuna (key ho to key: "..." bhi do):
   // { name: "llm7", base: "https://api.llm7.io/v1", model: "MODEL-ID-YAHAN" },
 ];
+
+// provider ki key: p.key, warna env[p.keyEnv], warna p.keyDefault
+export const keyOf = (p) => p.key || (p.keyEnv && typeof process !== "undefined" && process.env && process.env[p.keyEnv]) || p.keyDefault || "";
 
 const TIMEOUT_MS = 60000;
 // fail hone par provider kitni der skip hoga (ms). 401/402/403 = key/paid maangta hai
@@ -48,7 +77,7 @@ const badUntil = new Map();
 // body: OpenAI chat body (object ya JSON string). Return: { text, provider, n }
 export async function chat(body, timeoutMs = TIMEOUT_MS) {
   const base = typeof body === "string" ? JSON.parse(body) : body;
-  let list = PROVIDERS.filter((p) => (badUntil.get(p.name) || 0) <= Date.now());
+  let list = PROVIDERS.filter((p) => (!p.type || p.type === "oai") && (badUntil.get(p.name) || 0) <= Date.now());
   if (!list.length) list = PROVIDERS; // sab cooldown me hon to bhi try karo
   const errs = [];
 
@@ -57,7 +86,7 @@ export async function chat(body, timeoutMs = TIMEOUT_MS) {
     const t = setTimeout(() => c.abort(), timeoutMs);
     try {
       const headers = { "content-type": "application/json" };
-      if (p.key) headers.authorization = "Bearer " + p.key;
+      if (keyOf(p)) headers.authorization = "Bearer " + keyOf(p);
       const b = { ...base, model: p.model, stream: false };
       delete b.stream_options;
       delete b.reasoning_effort;
