@@ -231,7 +231,10 @@ export class DuckClient {
       try {
         const rw = {};
         if (wantModel !== DEFAULT_MODEL) rw.model = wantModel;
-        if (reasoning_effort) rw.reasoningEffort = String(reasoning_effort); // duck.ai body field: reasoningEffort
+        if (reasoning_effort) { // duck.ai body field: reasoningEffort (page default = "none")
+          const e = String(reasoning_effort).toLowerCase();
+          rw.reasoningEffort = { fast: "none", off: "none", false: "none" }[e] || e;
+        }
         text = await this.#send(id, flatten(messages), timeoutMs, this.rewriteOk && Object.keys(rw).length ? rw : null);
       } catch (e) {
         if (e.kind === "rewrite") { // body badalne par challenge fail -> bina badle default model se
