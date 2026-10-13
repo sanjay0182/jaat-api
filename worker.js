@@ -1,3 +1,10 @@
+import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
+
+// free-fallback.mjs ka har provider apna alag model ban jata hai (duck ki tarah),
+// name se match hoke seedha us provider ko call hota hai (koi chain/fallback nahi)
+const FREE_MODELS = FREE_PROVIDERS.map((p) => p.name);
+const isFreeModel = (m) => typeof m === "string" && FREE_MODELS.includes(m);
+
 // runner ka jawab fail maana jaye: null (timeout) ya {error} bina choices ke
 function failed(out) {
   if (!out) return true;
@@ -31,18 +38,21 @@ export class Hub {
     const p = new URL(req.url).pathname;
 
     if (p === "/submit") {
-      // body: { provider: "jaat" | "duck", body: <json string>, fallback: <json string> (sirf duck ke liye) }
+      // body: { provider: "jaat" | "duck" | "free", name: <free provider ka naam, sirf "free" ke liye>,
+      //         body: <json string>, fallback: <json string> (sirf duck ke liye) }
       const job = await req.json();
       this.lastRequest = Date.now();
       await this.state.storage.put("lastRequest", this.lastRequest);
 
-      let provider = job.provider === "duck" ? "duck" : "jaat";
+      let provider = job.provider === "duck" ? "duck" : job.provider === "free" ? "free" : "jaat";
       let body = job.body;
+      const name = job.name; // free provider ka naam (jaise "vireonix", "kilo-ultra")
       const model = String(job.model || "");
       const fb = job.fallback; // duck fail ho to is body se jaat chalega
       const useFallback = fb && (this.env.DUCK_FALLBACK || "1") !== "0";
       const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 5000);
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
+      const freeWait = Number(this.env.FREE_WAIT_MS || 70000);
       const extra = {};
 
       // duck abhi-abhi fail hua tha -> seedha jaat (har request par duck ka intezaar nahi).
@@ -52,7 +62,7 @@ export class Hub {
         provider = "jaat"; body = fb; extra["x-jaat-duck-skipped"] = "cooldown";
       }
 
-      let out = await this.run(provider, body, provider === "duck" ? duckWait : 180000);
+      let out = await this.run(provider, body, provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000, name);
 
       if (provider === "duck" && failed(out)) {
         const e = errInfo(out);
@@ -95,10 +105,10 @@ export class Hub {
   }
 
   // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
-  async run(provider, body, waitMs) {
+  async run(provider, body, waitMs, name) {
     const id = crypto.randomUUID();
     const done = new Promise(r => this.waiters.set(id, r));
-    this.queue.push({ id, provider, body });
+    this.queue.push({ id, provider, name, body });
     this.flush();
 
     // koi runner nahi sun raha -> naya run start karo
@@ -161,6 +171,7 @@ async function handle(req, env) {
       data: [
         { id: "jaat-default", object: "model", created: 0, owned_by: "jaat" },
         ...DUCK_MODELS.map(id => ({ id, object: "model", created: 0, owned_by: "duck.ai" })),
+        ...FREE_PROVIDERS.map(p => ({ id: p.name, object: "model", created: 0, owned_by: new URL(p.base).hostname })),
       ],
     });
   }
@@ -171,7 +182,8 @@ async function handle(req, env) {
     try { j = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
     const wantStream = j.stream === true;
     const duck = isDuckModel(j.model);
-    const shownModel = duck ? j.model : "jaat-default";
+    const free = !duck && isFreeModel(j.model);
+    const shownModel = duck || free ? j.model : "jaat-default";
     j.stream = false; delete j.stream_options;
 
     // jaat (vireonix) wali body: model "auto" + cache todne ke liye random note
@@ -182,6 +194,8 @@ async function handle(req, env) {
     };
     const job = duck
       ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }), fallback: jaatBody() }
+      : free
+      ? { provider: "free", name: j.model, body: JSON.stringify({ messages: j.messages || [] }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });

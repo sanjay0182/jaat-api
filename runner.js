@@ -1,6 +1,7 @@
 // Har run ~3 min chalta hai. Agle run ko 2 min par start karta hai (overlap),
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
 import { DuckClient } from "./duck.js";
+import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
 
 const W = process.env.WORKER;
 const H = { authorization: "Bearer " + process.env.RUNNER_SECRET };
@@ -84,8 +85,35 @@ function callUpstream(body) {
   });
 }
 
+// "free" provider: model naam se free-fallback.mjs ki list me se wahi provider dhoondo
+// aur seedha usi ko ek baar call karo (koi chain/fallback nahi, duck jaisa direct hit)
+const FREE_TIMEOUT_MS = Number(process.env.FREE_TIMEOUT_MS || 60000);
+async function callFree(name, body, timeoutMs = FREE_TIMEOUT_MS) {
+  const p = FREE_PROVIDERS.find((x) => x.name === name);
+  if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
+  const base = typeof body === "string" ? JSON.parse(body) : body;
+  const b = { ...base, model: p.model, stream: false };
+  delete b.stream_options; delete b.reasoning_effort;
+  const headers = { "content-type": "application/json" };
+  if (p.key) headers.authorization = "Bearer " + p.key;
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), timeoutMs);
+  try {
+    const r = await fetch(p.base + "/chat/completions", { method: "POST", headers, body: JSON.stringify(b), signal: c.signal });
+    const text = await r.text();
+    let ok = false;
+    try { ok = r.ok && !!JSON.parse(text).choices; } catch {}
+    if (!ok) throw new Error("free " + name + " " + r.status + ": " + text.slice(0, 200));
+    return text;
+  } catch (e) {
+    throw e.name === "AbortError" ? new Error("free " + name + " timeout") : e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // Har request alag chalti hai: loop turant agli request sun'ne lagta hai
-async function handle({ id, provider, body }) {
+async function handle({ id, provider, name, body }) {
   // job milte hi worker ko ack (nahi to worker 4s baad job dusre runner ko de deta hai)
   fetch(W + "/ack", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id }) }).catch(() => {});
   const t0 = Date.now();
@@ -94,12 +122,14 @@ async function handle({ id, provider, body }) {
     if (provider === "duck") {
       const j = JSON.parse(body);
       data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort }, DUCK_TIMEOUT_MS);
+    } else if (provider === "free") {
+      data = await callFree(name, body);
     } else {
       const r = await callUpstream(body);
       data = r.text; tries = r.n;
     }
   } catch (e) {
-    console.log(provider === "duck" ? "duck error:" : "upstream error:", e.message);
+    console.log(provider + " error:", e.message);
     data = JSON.stringify({ error: String(e.message || "upstream failed"), _jaat_kind: e.kind || "error" });
   }
   const ms = Date.now() - t0;
