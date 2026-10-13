@@ -6,7 +6,7 @@ const W = process.env.WORKER;
 const H = { authorization: "Bearer " + process.env.RUNNER_SECRET };
 
 const RUN_MS = Number(process.env.RUN_MS || 3 * 60e3);
-const NEXT_AT_MS = 2 * 60e3;
+const NEXT_AT_MS = Number(process.env.NEXT_AT_MS || 2 * 60e3);
 const IDLE_MS = 15 * 60e3;
 
 // vireonix kabhi 5s me, kabhi 50s me jawab deta hai.

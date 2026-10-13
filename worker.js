@@ -41,7 +41,7 @@ export class Hub {
       const model = String(job.model || "");
       const fb = job.fallback; // duck fail ho to is body se jaat chalega
       const useFallback = fb && (this.env.DUCK_FALLBACK || "1") !== "0";
-      const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 120000);
+      const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 5000);
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
       const extra = {};
 
@@ -76,7 +76,7 @@ export class Hub {
         setTimeout(() => {
           const i = this.pollers.indexOf(res);
           if (i > -1) { this.pollers.splice(i, 1); res(new Response(null, { status: 204 })); }
-        }, 15000);
+        }, 5000);
       });
     }
 
@@ -125,12 +125,12 @@ export class Hub {
       this.pollers.shift()(Response.json(this.lease(this.queue.shift())));
   }
 
-  // job runner ko diya; 4s me ack na aaye (runner mar chuka tha) to wapas queue me
+  // job runner ko diya; 5s me ack na aaye (runner mar chuka tha) to wapas queue me
   lease(job) {
     const timer = setTimeout(() => {
       if (!this.leased.delete(job.id)) return;
       if (this.waiters.has(job.id)) { this.queue.unshift(job); this.flush(); }
-    }, 4000);
+    }, 5000);
     this.leased.set(job.id, timer);
     return job;
   }
