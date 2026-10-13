@@ -1,0 +1,44 @@
+name: duck-test
+# Ek baar haath se chalao (Actions -> duck-test -> Run workflow).
+# Batata hai ki GitHub runner ke IP se duck.ai kaam karta hai ya nahi (headless aur headed dono).
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "duck.ai ko bhejne wala sawaal"
+        default: "Reply with exactly: PONG"
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [headless, headed]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: playwright-core install
+        run: npm i --no-audit --no-fund --no-save playwright-core
+      - name: duck.ai test (${{ matrix.mode }})
+        env:
+          DUCK_DEBUG_DIR: debug
+          PROMPT: ${{ inputs.prompt }}
+        run: |
+          echo "runner IP: $(curl -s https://api.ipify.org || echo unknown)"
+          google-chrome --version || true
+          if [ "${{ matrix.mode }}" = "headed" ]; then
+            DUCK_HEADED=1 xvfb-run -a node duck.js "$PROMPT"
+          else
+            node duck.js "$PROMPT"
+          fi
+      - name: debug files (screenshot + page text)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: duck-debug-${{ matrix.mode }}
+          path: debug/
+          if-no-files-found: ignore
