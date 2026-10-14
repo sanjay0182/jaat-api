@@ -231,9 +231,14 @@ export class DuckClient {
       try {
         const rw = {};
         if (wantModel !== DEFAULT_MODEL) rw.model = wantModel;
+        const isTinfoil = wantModel.startsWith("tinfoil/");
         if (reasoning_effort) { // duck.ai body field: reasoningEffort (page default = "none")
           const e = String(reasoning_effort).toLowerCase();
           rw.reasoningEffort = { fast: "none", off: "none", false: "none" }[e] || e;
+        } else if (isTinfoil) {
+          // tinfoil models (gpt-oss-120b, gemma4-31b) khud reasoning models hain,
+          // "none" unki reasoning capability disable kar deta hai -> default "low"
+          rw.reasoningEffort = "low";
         }
         text = await this.#send(id, flatten(messages), timeoutMs, this.rewriteOk && Object.keys(rw).length ? rw : null);
       } catch (e) {
