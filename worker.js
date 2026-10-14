@@ -123,10 +123,10 @@ export class Hub {
       const model = String(job.model || "");
       const fb = job.fallback; // duck fail ho to is body se jaat chalega
       const useFallback = fb && (this.env.DUCK_FALLBACK || "1") !== "0";
-      const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 5000);
-      const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
+      const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 50);
+      const duckWait = Number(this.env.DUCK_WAIT_MS || 100);
       const fp = provider === "free" ? FREE_PROVIDERS.find((x) => x.name === name) : null;
-      const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 60000) + 10000);
+      const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
       const extra = {};
 
       // duck abhi-abhi fail hua tha -> seedha jaat (har request par duck ka intezaar nahi).
