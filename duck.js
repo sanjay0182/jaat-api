@@ -18,9 +18,11 @@ import { pathToFileURL } from "node:url";
 const BASE = process.env.DUCK_BASE || "https://duck.ai";
 export const DEFAULT_MODEL = "gpt-5.6-luna";
 const WARM_MIN_MS = Number(process.env.DUCK_WARM_MIN_MS || 2000);
-const WARM_POOL = Number(process.env.DUCK_WARM_POOL || 1); // kitne page pehle se garam rakhne hain
+const WARM_POOL = Number(process.env.DUCK_WARM_POOL || 3); // kitne page pehle se garam rakhne hain
 const WARM_MAX_MS = Number(process.env.DUCK_WARM_MAX_MS || 8000);
-const MAX_PAGES = Number(process.env.DUCK_MAX_PAGES || 3);
+const MAX_PAGES = Math.max(Number(process.env.DUCK_MAX_PAGES || 3), WARM_POOL); // MAX_PAGES kabhi pool se chhota nahi
+const STALE_MS = 150000; // itne se purana warm page band karke naya banate hain
+const SWEEP_MS = 30000;  // har 30s warm pages ki safai
 const PROMPT_FALLBACK_LIMIT = 12000; // textarea me maxlength na mile to
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
@@ -183,6 +185,7 @@ export class DuckClient {
     this.rewriteOk = true; // body rewrite ERR_CHALLENGE de to band
     this.n = 0;
     this.ready = []; this.refilling = 0; // pehle se garam (warm) pages
+    this.sweeper = null;
   }
 
   async ensure() {
@@ -199,7 +202,9 @@ export class DuckClient {
         `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Safari/537.36`;
       this.ctx = await this.browser.newContext({ userAgent: ua, locale: "en-US", viewport: { width: 1280, height: 800 } });
       await this.ctx.addInitScript(INIT_SCRIPT);
-      console.log("duck: chrome ready", ver, headless ? "(headless)" : "(headed)");
+      this.sweeper = setInterval(() => this.#sweep(), SWEEP_MS); // stale warm pages hatao + naye banao
+      this.sweeper.unref?.();
+      console.log("duck: chrome ready", ver, headless ? "(headless)" : "(headed)", "pool", WARM_POOL, "max", MAX_PAGES);
     })().catch((e) => { this.starting = null; throw e; });
     await this.starting;
   }
@@ -208,7 +213,7 @@ export class DuckClient {
     if (this.active >= MAX_PAGES) await new Promise((r) => this.waiters.push(r));
     this.active++;
   }
-  free() { this.active--; const w = this.waiters.shift(); if (w) w(); }
+  free() { this.active--; const w = this.waiters.shift(); if (w) w(); this.#refill(); }
 
   async debug(page, tag) {
     try {
@@ -222,7 +227,8 @@ export class DuckClient {
   }
 
   // messages (OpenAI style) -> OpenAI chat.completion JSON string
-  async chat({ model, messages, reasoning_effort }, timeoutMs = 80000) {
+  // onDelta(text) optional: SSE ka har naya tukda aate hi turant call hota hai (real streaming ke liye)
+  async chat({ model, messages, reasoning_effort, onDelta }, timeoutMs = 80000) {
     await this.ensure();
     await this.slot();
     const id = ++this.n;
@@ -237,12 +243,12 @@ export class DuckClient {
           const e = String(reasoning_effort).toLowerCase();
           rw.reasoningEffort = { fast: "none", off: "none", false: "none" }[e] || e;
         }
-        text = await this.#send(id, flatten(messages), timeoutMs, this.rewriteOk && Object.keys(rw).length ? rw : null);
+        text = await this.#send(id, flatten(messages), timeoutMs, this.rewriteOk && Object.keys(rw).length ? rw : null, onDelta);
       } catch (e) {
         if (e.kind === "rewrite") { // body badalne par challenge fail -> bina badle default model se
           this.rewriteOk = false;
           console.log("duck: model rewrite reject hua, default model use ho raha hai");
-          text = await this.#send(id, flatten(messages), Math.max(15000, timeoutMs - (Date.now() - t0)), null);
+          text = await this.#send(id, flatten(messages), Math.max(15000, timeoutMs - (Date.now() - t0)), null, onDelta);
         } else throw e;
       }
       const plen = JSON.stringify(messages || "").length;
@@ -275,17 +281,34 @@ export class DuckClient {
 
   #refill() {
     if (!this.ctx) return;
-    while (this.ready.length + this.refilling < WARM_POOL) {
+    // pool poora rakho, lekin chrome ke kul pages MAX_PAGES + WARM_POOL se upar nahi (runner ki memory bachane ke liye)
+    while (this.ready.length + this.refilling < WARM_POOL && this.ctx.pages().length + this.refilling < MAX_PAGES + WARM_POOL) {
+      const delay = this.refilling * 400; // ek saath 3 page khulne se CPU na atke, thoda gap
       this.refilling++;
-      this.#prepare().then((p) => { this.ready.push(p); }).catch(() => {}).finally(() => { this.refilling--; });
+      setTimeout(() => {
+        this.#prepare().then(async (p) => {
+          if (this.ctx) this.ready.push(p); else await p.page.close().catch(() => {});
+        }).catch(() => {}).finally(() => { this.refilling--; });
+      }, delay);
     }
+  }
+
+  // stale (>150s) warm pages band karo, phir pool dobara bharo
+  async #sweep() {
+    if (!this.ctx) return;
+    const now = Date.now();
+    const bad = (p) => now - p.at >= STALE_MS || p.page.isClosed();
+    const old = this.ready.filter(bad);          // sync partition: beech me #takePage se race nahi
+    this.ready = this.ready.filter((p) => !bad(p));
+    await Promise.all(old.map((p) => p.page.close().catch(() => {})));
+    this.#refill();
   }
 
   async #takePage() {
     // 150s se purana warm page chhod do (stale ho sakta hai)
     while (this.ready.length) {
       const p = this.ready.shift();
-      if (Date.now() - p.at < 150000 && !p.page.isClosed()) { this.#refill(); return p.page; }
+      if (Date.now() - p.at < STALE_MS && !p.page.isClosed()) { this.#refill(); return p.page; }
       await p.page.close().catch(() => {});
     }
     this.#refill();
@@ -297,8 +320,14 @@ export class DuckClient {
     try { await this.ensure(); this.#refill(); } catch (e) { console.log("duck warmup fail:", e.message); }
   }
 
-  async #send(id, prompt, timeoutMs, rewrite) {
+  async #send(id, prompt, timeoutMs, rewrite, onDelta) {
     const deadline = Date.now() + timeoutMs;
+    let started = false; // pehla delta bhejne se pehle shuruaati whitespace hata do (final out.trim() jaisa)
+    const emit = (t) => {
+      if (!onDelta || !t) return;
+      if (!started) { t = t.replace(/^\s+/, ""); if (!t) return; started = true; }
+      try { onDelta(t); } catch {} // callback ka error duck ko na roke
+    };
     const page = await this.#takePage();
     try {
       const ta = await page.$("textarea");
@@ -335,11 +364,11 @@ export class DuckClient {
           let i;
           while ((i = buf.indexOf("\n")) >= 0) {
             const ev = parseLine(buf.slice(0, i)); buf = buf.slice(i + 1);
-            if (ev && ev.message) out += ev.message;
+            if (ev && ev.message) { out += ev.message; emit(ev.message); }
           }
         }
         if (st.done) {
-          const ev = parseLine(buf); if (ev && ev.message) out += ev.message;
+          const ev = parseLine(buf); if (ev && ev.message) { out += ev.message; emit(ev.message); }
           if (!saw) { await this.debug(page, `r${id}-empty`); throw new DuckError("duck.ai ne bina jawab ke stream band kar di"); }
           if (!out.trim()) throw new DuckError("duck.ai ka jawab khali aaya");
           return out.trim();
@@ -366,6 +395,9 @@ export class DuckClient {
   }
 
   async close() {
+    clearInterval(this.sweeper); this.sweeper = null;
+    const rd = this.ready; this.ready = [];
+    await Promise.all(rd.map((p) => p.page.close().catch(() => {})));
     try { await this.browser?.close(); } catch {}
     this.browser = null; this.ctx = null; this.starting = null;
   }

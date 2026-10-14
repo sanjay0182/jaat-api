@@ -89,16 +89,35 @@ function callUpstream(body) {
 
 const FREE_TIMEOUT_MS = Number(process.env.FREE_TIMEOUT_MS || 60000); // provider me "timeout" ho to wahi chalta hai
 
+// duck stream: deltas ko ~120ms me batch karke worker ke /chunk par bhejo.
+// Pehla delta turant jata hai (first-token fast), baaki batch me. chain se order same rehta hai.
+function makeSink(id) {
+  let buf = "", seq = 0, timer = null, chain = Promise.resolve();
+  const push = () => {
+    timer = null;
+    if (!buf) return;
+    const delta = buf, s = seq++; buf = "";
+    chain = chain.then(() =>
+      fetch(W + "/chunk", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id, delta, seq: s }) }).catch(() => {})
+    );
+  };
+  return {
+    add(t) { buf += t; if (seq === 0) push(); else if (!timer) timer = setTimeout(push, 120); },
+    async end() { clearTimeout(timer); push(); await chain; }, // /result se pehle saare chunks pahunch jayen
+  };
+}
+
 // Har request alag chalti hai: loop turant agli request sun'ne lagta hai
-async function handle({ id, provider, name, body }) {
+async function handle({ id, provider, name, body, stream }) {
   // job milte hi worker ko ack (nahi to worker 4s baad job dusre runner ko de deta hai)
   fetch(W + "/ack", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id }) }).catch(() => {});
   const t0 = Date.now();
   let data, tries = 0;
+  const sink = provider === "duck" && stream ? makeSink(id) : null; // sirf duck + stream=true par
   try {
     if (provider === "duck") {
       const j = JSON.parse(body);
-      data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort }, DUCK_TIMEOUT_MS);
+      data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort, onDelta: sink ? sink.add : undefined }, DUCK_TIMEOUT_MS);
     } else if (provider === "free") {
       const p = FREE_PROVIDERS.find((x) => x.name === name);
       if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
@@ -111,6 +130,7 @@ async function handle({ id, provider, name, body }) {
     console.log(provider + " error:", e.message);
     data = JSON.stringify({ error: String(e.message || "upstream failed"), _jaat_kind: e.kind || "error" });
   }
+  if (sink) await sink.end(); // error aaye tab bhi pehle bache chunks bhejo, phir final /result
   const ms = Date.now() - t0;
   console.log(provider || "jaat", "ms:", ms, "winner try:", tries);
   try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; o._jaat_try = tries; data = JSON.stringify(o); } catch {}

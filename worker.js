@@ -25,10 +25,19 @@ const DUCK_MODELS = [
 ];
 const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUCK_MODELS.includes(m));
 
+// stream state ko ek event (naya chunk / final result) tak ya ms tak ruko
+function waitEvt(st, ms) {
+  return new Promise((r) => {
+    const t = setTimeout(() => { st.wake = null; r(); }, Math.max(1, ms));
+    st.wake = () => { clearTimeout(t); st.wake = null; r(); };
+  });
+}
+
 export class Hub {
   constructor(state, env) {
     this.state = state; this.env = env;
     this.queue = []; this.pollers = []; this.waiters = new Map(); this.leased = new Map();
+    this.streams = new Map(); // job id -> { chunks:[], last, fin, data, wake } (real streaming buffer)
     this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0;
     state.blockConcurrencyWhile(async () => {
       this.lastRequest = (await state.storage.get("lastRequest")) || 0;
@@ -125,18 +134,34 @@ export class Hub {
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
       const label = provider === "free" ? name : provider === "duck" ? model : "vireonix";
 
-      const out = await this.run(provider, job.body, provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000, name);
-      const headers = { "content-type": "application/json", "x-jaat-provider": provider };
+      const wait = provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000;
 
-      if (!out) {
-        return new Response(JSON.stringify({ error: { message: label + ": timeout (koi jawab nahi aaya)", type: "timeout", provider: label } }), { status: 504, headers });
+      // real streaming: sirf duck + stream=true. Pehla chunk aane tak normal (JSON error / fake-stream fallback) rasta
+      if (provider === "duck" && job.stream === true) {
+        const { id, done } = await this.enqueue(provider, job.body, name, true);
+        const st = this.streams.get(id);
+        const deadline = Date.now() + wait;
+        while (!st.chunks.length && !st.fin && Date.now() < deadline) await waitEvt(st, deadline - Date.now());
+        if (!st.chunks.length) { // koi chunk nahi aaya: final result (ya timeout) ko normal tareeke se lautao
+          const out = st.fin ? st.data : null;
+          this.cleanup(id);
+          return this.reply(out, provider, label);
+        }
+        return this.streamResponse(id, st, deadline, model, label);
       }
-      if (failed(out)) {
-        const e = errInfo(out);
-        headers["x-jaat-error"] = e.msg;
-        return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label } }), { status: 502, headers });
+
+      const out = await this.run(provider, job.body, wait, name);
+      return this.reply(out, provider, label);
+    }
+
+    // runner se aaye delta chunks (batched). seq se duplicate/purane chunk ignore
+    if (p === "/chunk") {
+      const { id, delta, seq } = await req.json();
+      const st = this.streams.get(id);
+      if (st && typeof delta === "string" && delta && !(seq <= st.last)) {
+        st.last = seq; st.chunks.push(delta); st.wake?.();
       }
-      return new Response(out, { headers });
+      return new Response("ok");
     }
 
     if (p === "/next") {
@@ -154,6 +179,8 @@ export class Hub {
     if (p === "/result") {
       const { id, data } = await req.json();
       this.unlease(id);
+      const st = this.streams.get(id);
+      if (st) { st.fin = true; st.data = data; st.wake?.(); }
       this.waiters.get(id)?.(data);
       return new Response("ok");
     }
@@ -165,11 +192,12 @@ export class Hub {
     return new Response("not found", { status: 404 });
   }
 
-  // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
-  async run(provider, body, waitMs, name) {
+  // job queue me daalo (+ zarurat ho to naya runner dispatch). { id, done } lautata hai
+  async enqueue(provider, body, name, stream) {
     const id = crypto.randomUUID();
     const done = new Promise(r => this.waiters.set(id, r));
-    this.queue.push({ id, provider, name, body });
+    if (stream) this.streams.set(id, { chunks: [], last: -1, fin: false, data: null, wake: null });
+    this.queue.push({ id, provider, name, body, stream: !!stream });
     this.flush();
 
     // koi runner nahi sun raha -> naya run start karo
@@ -184,11 +212,77 @@ export class Hub {
         });
       } catch {}
     }
+    return { id, done };
+  }
 
+  // job ka saaf-safai: waiter, stream buffer, aur agar queue me hi pada ho to wahan se bhi
+  cleanup(id) {
+    this.waiters.delete(id); this.streams.delete(id);
+    const i = this.queue.findIndex(j => j.id === id);
+    if (i > -1) this.queue.splice(i, 1);
+  }
+
+  // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
+  async run(provider, body, waitMs, name) {
+    const { id, done } = await this.enqueue(provider, body, name, false);
     const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), waitMs))]);
-    this.waiters.delete(id);
-    if (out === null) { const i = this.queue.findIndex(j => j.id === id); if (i > -1) this.queue.splice(i, 1); }
+    this.cleanup(id);
     return out;
+  }
+
+  // runner ka final jawab -> HTTP Response (pehle /submit me inline tha, ab stream wale path se bhi use hota hai)
+  reply(out, provider, label) {
+    const headers = { "content-type": "application/json", "x-jaat-provider": provider };
+    if (!out) {
+      return new Response(JSON.stringify({ error: { message: label + ": timeout (koi jawab nahi aaya)", type: "timeout", provider: label } }), { status: 504, headers });
+    }
+    if (failed(out)) {
+      const e = errInfo(out);
+      headers["x-jaat-error"] = e.msg;
+      return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label } }), { status: 502, headers });
+    }
+    return new Response(out, { headers });
+  }
+
+  // asli SSE: OpenAI chunk format. role delta -> content deltas -> finish chunk -> [DONE]. Beech me error aaye to error event + [DONE]
+  streamResponse(id, st, deadline, model, label) {
+    const enc = new TextEncoder();
+    const cid = "chatcmpl-" + crypto.randomUUID();
+    const created = Math.floor(Date.now() / 1000);
+    const ev = (x) => enc.encode("data: " + JSON.stringify({ id: cid, object: "chat.completion.chunk", created, model, ...x }) + "\n\n");
+    const errEv = (message, type) => enc.encode("data: " + JSON.stringify({ error: { message: label + ": " + message, type, provider: label } }) + "\n\n");
+    const hub = this;
+    let cancelled = false;
+    return new Response(new ReadableStream({
+      async start(ctrl) {
+        try {
+          ctrl.enqueue(ev({ choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] }));
+          let pos = 0, timedOut = false;
+          while (!cancelled) {
+            while (pos < st.chunks.length) ctrl.enqueue(ev({ choices: [{ index: 0, delta: { content: st.chunks[pos++] }, finish_reason: null }] }));
+            if (st.fin) break;
+            if (Date.now() >= deadline) { timedOut = true; break; }
+            await waitEvt(st, deadline - Date.now());
+          }
+          if (!cancelled) {
+            if (timedOut) ctrl.enqueue(errEv("timeout (stream beech me ruk gayi)", "timeout"));
+            else {
+              let err = null, fr = "stop";
+              try {
+                const o = JSON.parse(st.data);
+                if (o.error && !o.choices) err = { msg: String(o.error).replace(/[^\x20-\x7e]/g, " ").slice(0, 160), kind: o._jaat_kind || "error" };
+                else fr = (o.choices && o.choices[0] && o.choices[0].finish_reason) || "stop";
+              } catch { err = { msg: "bad response", kind: "error" }; }
+              ctrl.enqueue(err ? errEv(err.msg, err.kind) : ev({ choices: [{ index: 0, delta: {}, finish_reason: fr }] }));
+            }
+            ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+          }
+        } catch {}
+        hub.cleanup(id);
+        try { ctrl.close(); } catch {}
+      },
+      cancel() { cancelled = true; st.wake?.(); hub.cleanup(id); }, // client chala gaya
+    }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no", "x-jaat-provider": "duck", "x-jaat-stream": "1" } });
   }
 
   flush() {
@@ -268,7 +362,7 @@ async function handle(req, env) {
       return JSON.stringify(k);
     };
     const job = duck
-      ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }) }
+      ? { provider: "duck", model: j.model, stream: wantStream, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }) }
       : free
       ? { provider: "free", name: j.model, body: JSON.stringify({ messages: j.messages || [] }) }
       : { provider: "jaat", body: jaatBody() };
@@ -276,6 +370,7 @@ async function handle(req, env) {
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
     await hub.fetch("https://hub/record", { method: "POST", body: JSON.stringify({ id: g.id, model: shownModel, provider: r.headers.get("x-jaat-provider") || "", status: r.status, ms: Date.now() - t0 }) });
     if (!wantStream || r.status !== 200) return r;
+    if (r.headers.get("x-jaat-stream") === "1") return r; // duck ki asli stream: seedha aage bhej do
 
     const d = await r.json();
     const c = d.choices && d.choices[0];
@@ -294,7 +389,7 @@ async function handle(req, env) {
     return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "", "x-jaat-duck-error": r.headers.get("x-jaat-duck-error") || "", "x-jaat-duck-skipped": r.headers.get("x-jaat-duck-skipped") || "" } });
   }
 
-  if (["/next", "/result", "/ack", "/status"].includes(u.pathname)) {
+  if (["/next", "/result", "/ack", "/status", "/chunk"].includes(u.pathname)) {
     if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
     return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
   }
