@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 const BASE = process.env.DUCK_BASE || "https://duck.ai";
 export const DEFAULT_MODEL = "gpt-5.6-luna";
 const WARM_MIN_MS = Number(process.env.DUCK_WARM_MIN_MS || 2000);
+const WARM_POOL = Number(process.env.DUCK_WARM_POOL || 1); // kitne page pehle se garam rakhne hain
 const WARM_MAX_MS = Number(process.env.DUCK_WARM_MAX_MS || 8000);
 const MAX_PAGES = Number(process.env.DUCK_MAX_PAGES || 3);
 const PROMPT_FALLBACK_LIMIT = 12000; // textarea me maxlength na mile to
@@ -181,6 +182,7 @@ export class DuckClient {
     this.active = 0; this.waiters = [];
     this.rewriteOk = true; // body rewrite ERR_CHALLENGE de to band
     this.n = 0;
+    this.ready = []; this.refilling = 0; // pehle se garam (warm) pages
   }
 
   async ensure() {
@@ -256,18 +258,49 @@ export class DuckClient {
     } finally { this.free(); }
   }
 
-  async #send(id, prompt, timeoutMs, rewrite) {
-    const deadline = Date.now() + timeoutMs;
+  // ---- pre-warm: duck.ai page pehle se khol ke rakho, request aate hi use ho ----
+  async #prepare() {
     const page = await this.ctx.newPage();
     try {
-      await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(45000, timeoutMs) });
-      // warm: textarea aaye aur kam se kam WARM_MIN_MS beete (challenge JS ko time chahiye)
+      await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 45000 });
       const t0 = Date.now();
       while (Date.now() - t0 < WARM_MAX_MS) {
         await this.#dismiss(page);
         if (Date.now() - t0 >= WARM_MIN_MS && (await page.$("textarea"))) break;
         await page.waitForTimeout(200);
       }
+      return { page, at: Date.now() };
+    } catch (e) { await page.close().catch(() => {}); throw e; }
+  }
+
+  #refill() {
+    if (!this.ctx) return;
+    while (this.ready.length + this.refilling < WARM_POOL) {
+      this.refilling++;
+      this.#prepare().then((p) => { this.ready.push(p); }).catch(() => {}).finally(() => { this.refilling--; });
+    }
+  }
+
+  async #takePage() {
+    // 150s se purana warm page chhod do (stale ho sakta hai)
+    while (this.ready.length) {
+      const p = this.ready.shift();
+      if (Date.now() - p.at < 150000 && !p.page.isClosed()) { this.#refill(); return p.page; }
+      await p.page.close().catch(() => {});
+    }
+    this.#refill();
+    return (await this.#prepare()).page;
+  }
+
+  // runner start hote hi chrome + ek page tayyar rakho (pehli duck request fast ho)
+  async warmup() {
+    try { await this.ensure(); this.#refill(); } catch (e) { console.log("duck warmup fail:", e.message); }
+  }
+
+  async #send(id, prompt, timeoutMs, rewrite) {
+    const deadline = Date.now() + timeoutMs;
+    const page = await this.#takePage();
+    try {
       const ta = await page.$("textarea");
       if (!ta) { await this.debug(page, `r${id}-no-textarea`); throw new DuckError("duck.ai textarea nahi mila (page badal gaya ya block page)", "layout"); }
 
@@ -277,7 +310,7 @@ export class DuckClient {
       await page.evaluate(RESET_JS, rewrite);
       await ta.click();
       await ta.fill(prompt);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(100);
       let sent = false;
       for (const b of await page.$$("button")) {
         const label = ((await b.innerText().catch(() => "")) || "").trim();
@@ -311,7 +344,7 @@ export class DuckClient {
           if (!out.trim()) throw new DuckError("duck.ai ka jawab khali aaya");
           return out.trim();
         }
-        await page.waitForTimeout(saw ? 200 : 400);
+        await page.waitForTimeout(saw ? 80 : 150);
       }
       await this.debug(page, `r${id}-timeout`);
       throw new DuckError("duck.ai timeout", "timeout");

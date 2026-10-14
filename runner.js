@@ -22,6 +22,7 @@ const duck = new DuckClient();
 const DUCK_TIMEOUT_MS = Number(process.env.DUCK_TIMEOUT_MS || 80000);
 
 const start = Date.now();
+duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
 let dispatched = false;
 let inflight = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
