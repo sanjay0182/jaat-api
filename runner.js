@@ -56,7 +56,7 @@ function callUpstream(body) {
     const text = await u.text();
     let ok = false;
     try { ok = u.ok && !!JSON.parse(text).choices; } catch {}
-    if (!ok) throw new Error("upstream " + u.status + ": " + text.slice(0, 300));
+    if (!ok) throw new Error("vireonix " + u.status + ": " + ((/<title>([\s\S]*?)<\/title>/.exec(text) || [])[1] || text.slice(0, 200)).trim());
     return text;
   };
 

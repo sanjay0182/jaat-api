@@ -29,7 +29,7 @@ export class Hub {
   constructor(state, env) {
     this.state = state; this.env = env;
     this.queue = []; this.pollers = []; this.waiters = new Map(); this.leased = new Map();
-    this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0; this.duckBadUntil = 0; this.duckBadModel = new Map();
+    this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0;
     state.blockConcurrencyWhile(async () => {
       this.lastRequest = (await state.storage.get("lastRequest")) || 0;
       this.keys = (await state.storage.get("keys")) || {};
@@ -111,45 +111,32 @@ export class Hub {
     }
 
     if (p === "/submit") {
-      // body: { provider: "jaat" | "duck" | "free", name: <free provider ka naam, sirf "free" ke liye>,
-      //         body: <json string>, fallback: <json string> (sirf duck ke liye) }
+      // body: { provider: "jaat" | "duck" | "free", name, model, body }
+      // Jis provider ko request gayi, wahi jawab dega. Koi fallback nahi: fail hua to uska asli error.
       const job = await req.json();
       this.lastRequest = Date.now();
       await this.state.storage.put("lastRequest", this.lastRequest);
 
-      let provider = job.provider === "duck" ? "duck" : job.provider === "free" ? "free" : "jaat";
-      let body = job.body;
-      const name = job.name; // free provider ka naam (jaise "vireonix", "kilo-ultra")
+      const provider = job.provider === "duck" ? "duck" : job.provider === "free" ? "free" : "jaat";
+      const name = job.name; // free provider ka naam
       const model = String(job.model || "");
-      const fb = job.fallback; // duck fail ho to is body se jaat chalega
-      const useFallback = fb && (this.env.DUCK_FALLBACK || "1") !== "0";
-      const cooldown = Number(this.env.DUCK_COOLDOWN_MS || 50);
-      const duckWait = Number(this.env.DUCK_WAIT_MS || 100);
+      const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
       const fp = provider === "free" ? FREE_PROVIDERS.find((x) => x.name === name) : null;
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
-      const extra = {};
+      const label = provider === "free" ? name : provider === "duck" ? model : "vireonix";
 
-      // duck abhi-abhi fail hua tha -> seedha jaat (har request par duck ka intezaar nahi).
-      // Ban poore duck ka cooldown banata hai; baaki error sirf usi model ka.
-      if (provider === "duck" && useFallback &&
-          (Date.now() < this.duckBadUntil || Date.now() < (this.duckBadModel.get(model) || 0))) {
-        provider = "jaat"; body = fb; extra["x-jaat-duck-skipped"] = "cooldown";
+      const out = await this.run(provider, job.body, provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000, name);
+      const headers = { "content-type": "application/json", "x-jaat-provider": provider };
+
+      if (!out) {
+        return new Response(JSON.stringify({ error: { message: label + ": timeout (koi jawab nahi aaya)", type: "timeout", provider: label } }), { status: 504, headers });
       }
-
-      let out = await this.run(provider, body, provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000, name);
-
-      if (provider === "duck" && failed(out)) {
+      if (failed(out)) {
         const e = errInfo(out);
-        if (e.kind === "ban") this.duckBadUntil = Date.now() + cooldown;
-        else this.duckBadModel.set(model, Date.now() + cooldown);
-        extra["x-jaat-duck-error"] = e.msg;
-        if (useFallback) { provider = "jaat"; out = await this.run("jaat", fb, 180000); }
+        headers["x-jaat-error"] = e.msg;
+        return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label } }), { status: 502, headers });
       }
-
-      const headers = { "content-type": "application/json", "x-jaat-provider": provider, ...extra };
-      return out
-        ? new Response(out, { headers })
-        : new Response('{"error":"timeout"}', { status: 504, headers });
+      return new Response(out, { headers });
     }
 
     if (p === "/next") {
@@ -281,7 +268,7 @@ async function handle(req, env) {
       return JSON.stringify(k);
     };
     const job = duck
-      ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }), fallback: jaatBody() }
+      ? { provider: "duck", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }) }
       : free
       ? { provider: "free", name: j.model, body: JSON.stringify({ messages: j.messages || [] }) }
       : { provider: "jaat", body: jaatBody() };
