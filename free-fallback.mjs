@@ -18,6 +18,9 @@ export const PROVIDERS = [
   { name: "kilo-stepfun", base: "https://api.kilo.ai/api/gateway", model: "stepfun/step-5-preview-free" },
   { name: "kilo-cohere", base: "https://api.kilo.ai/api/gateway", model: "cohere/north-mini-code:free" },
   { name: "kilo-dots", base: "https://api.kilo.ai/api/gateway", model: "dots-studio/dots-3-note-preview:free" },
+  // researched 2026-10-14 — khud test nahi kiya (bash offline), kilo gateway ke hi 2 free model add
+  { name: "kilo-tencent-hy3", base: "https://api.kilo.ai/api/gateway", model: "tencent/hy3:free" },
+  { name: "kilo-qwen38-27b", base: "https://api.kilo.ai/api/gateway", model: "qwen/qwen3.8-27b:free" },
   { name: "br-lightning", base: "https://blockrun.ai/v1", model: "nvidia/nemotron-3.5-lightning" },
   { name: "br-cohere", base: "https://blockrun.ai/v1", model: "cohere/north-mini-code" },
   { name: "br-poolside", base: "https://blockrun.ai/v1", model: "poolside/laguna-xs-2.1" },
@@ -28,6 +31,14 @@ export const PROVIDERS = [
   { name: "ovh-llama70", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Meta-Llama-3_3-70B-Instruct" },
   { name: "ovh-qwen27", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Qwen3.6-27B" },
   { name: "ovh-mistral-s", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Mistral-Small-3.2-24B-Instruct-2506" },
+  // OVH ke chote/lightweight free-tier models — user ne khud live test kiya (2026-10-14), sab 200 PASS
+  { name: "ovh-qwen35-9b", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Qwen3.5-9B" },
+  { name: "ovh-oss20", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "gpt-oss-20b" },
+  { name: "ovh-mistral7b", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Mistral-7B-Instruct-v0.3" },
+  { name: "ovh-mistral-nemo", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Mistral-Nemo-Instruct-2407" },
+  { name: "ovh-qwen-vl", base: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", model: "Qwen2.5-VL-72B-Instruct" },
+  // tested 404 (2026-10-14), model ID format galat tha, isliye hata diya:
+  // Qwen3-Coder-30B-A3B-Instruct, Llama-3.1-8B-Instruct, Qwen3-32B
   { name: "unturf-qwen", base: "https://qwen.ai.unturf.com/v1", model: "turboderp/Qwen3.8-27B-exl3" },
   { name: "unturf-hermes", base: "https://hermes.ai.unturf.com/v1", model: "turboderp/Qwen3.8-27B-exl3" },
   { name: "kilo-lfm", base: "https://api.kilo.ai/api/gateway", model: "liquid/lfm-2.5-2.6b:free" },
@@ -62,6 +73,19 @@ export const PROVIDERS = [
   { name: "ds-flash", type: "proxy_get", base: "https://anshapi.vercel.app/api/deepseek", model: "deepseek-v4-flash", maxChars: 6500 },
   { name: "dai-standard", type: "deepai", base: "https://api.deepai.org/hacking_is_a_serious_crime", model: "standard", keyEnv: "DAI_KEY", keyDefault: "tryit-8803332334-5329fed31418c18274ac106f280207f3", maxChars: 3000 },
   { name: "uai-reasoning", type: "uai", base: "https://app.unlimitedai.chat/api/chat", model: "chat-model-reasoning", maxChars: 6000, timeout: 150000 },
+  // ---- researched 2026-10-14, bina key ke chalte hain (khud test nahi kiya, bash yahan offline hai) ----
+  // Pollinations.ai — text.pollinations.ai/openai, bilkul free, signup/key zaroori nahi
+  { name: "poll-openai", base: "https://text.pollinations.ai/openai", model: "openai" },
+  { name: "poll-openai-large", base: "https://text.pollinations.ai/openai", model: "openai-large" },
+  { name: "poll-openai-reasoning", base: "https://text.pollinations.ai/openai", model: "openai-reasoning" },
+  { name: "poll-qwen-coder", base: "https://text.pollinations.ai/openai", model: "qwen-coder" },
+  { name: "poll-llama", base: "https://text.pollinations.ai/openai", model: "llama" },
+  { name: "poll-mistral", base: "https://text.pollinations.ai/openai", model: "mistral" },
+  { name: "poll-deepseek-r", base: "https://text.pollinations.ai/openai", model: "deepseek-reasoning" },
+  // LLM7.io — api.llm7.io/v1, bina signup 30 RPM free (key na ho to bhi chal jata hai)
+  { name: "llm7-deepseek-r1", base: "https://api.llm7.io/v1", model: "deepseek-r1", keyDefault: "unused" },
+  { name: "llm7-qwen25", base: "https://api.llm7.io/v1", model: "qwen2.5", keyDefault: "unused" },
+  { name: "llm7-gpt4o-mini", base: "https://api.llm7.io/v1", model: "gpt-4o-mini-2024-07-18", keyDefault: "unused" },
   // naya jodne ka namuna (key ho to key: "..." bhi do):
   // { name: "llm7", base: "https://api.llm7.io/v1", model: "MODEL-ID-YAHAN" },
 ];
