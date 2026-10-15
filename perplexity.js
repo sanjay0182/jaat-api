@@ -62,6 +62,24 @@ async function passChallenge(page, ms = 22000) {
   }
   return false;
 }
+// citation chips (source naam, +N) ko page me hi chhupa do, taaki innerText me aayein hi nahi
+async function hideChips(page) {
+  try {
+    await page.evaluate((sel) => {
+      const clean = (e) => (e.textContent || "").replace(/[\u200b-\u200d\u00a0\ufeff]/g, " ").trim();
+      for (const r of document.querySelectorAll(sel)) {
+        r.querySelectorAll("a, span, div, button").forEach((e) => {
+          if (e.children.length > 2) return;
+          const t = clean(e);
+          if (!t || t.length > 40) return;
+          if (/^\+\d+$/.test(t)) { e.style.display = "none"; return; }
+          const inLink = e.tagName === "A" || !!e.closest("a");
+          if (inLink && /^[a-z0-9][a-z0-9.\-]*(\s*\+\d+)?$/i.test(t)) e.style.display = "none";
+        });
+      }
+    }, SEL.answer);
+  } catch {}
+}
 // page kya dikha raha hai - error message me jata hai (API ke 502 me bhi dikhega)
 async function pageInfo(page) {
   const title = await page.title().catch(() => "");
@@ -151,7 +169,12 @@ function answerFromSSE(raw) {
 // Sirf akele source-jaise lines hatate hain; kuch bacha hi na to original wapas.
 function cleanDom(t) {
   const lines = String(t || "").split(/\r?\n/);
-  const isChip = (l) => { const x = l.trim(); return /^\+\d+$/.test(x) || (x.length > 0 && x.length <= 32 && /^[a-z0-9][a-z0-9.\-]*$/.test(x) && !/^\d+$/.test(x)); };
+  const isChip = (l) => {
+    const x = l.replace(/[\u200b-\u200d\u00a0\ufeff]/g, " ").trim();
+    if (/^\+\d+$/.test(x)) return true;
+    const y = x.replace(/\s*\+\d+$/, ""); // "cardekho +1" ek hi line me
+    return y.length > 0 && y.length <= 40 && /^[a-z0-9][a-z0-9.\-]*$/.test(y) && !/^\d+$/.test(y);
+  };
   const kept = lines.filter((l) => !isChip(l));
   const out = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return out && kept.length < lines.length && kept.some((l) => /\s/.test(l.trim())) ? out : String(t || "").trim();
@@ -270,6 +293,7 @@ export class PplxClient {
         await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
         if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
+        await hideChips(page);
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
         const txt = n ? (await els.nth(n - 1).innerText().catch(() => "")).trim() : "";
