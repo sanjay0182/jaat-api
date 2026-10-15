@@ -240,17 +240,22 @@ export class CgptClient {
     if (net.status === 403) await this.fail(page, "403", "chatgpt.com ne request roki (Cloudflare/sentinel, shayad runner IP block). DUCK_HEADED=1 try karo", "challenge");
   }
 
-  // beech me popup/dialog: cookie / "stay logged out" hatao; limit ya baar-baar login dialog = ratelimit
+  // beech me popup/dialog: cookie / "stay logged out" hatao; limit = ratelimit;
+  // login dialog 8 sec tak band na ho to ratelimit (error me dialog ka text bhi)
   async checkDialog(page, st) {
     const d = page.locator(SEL.dialog).first();
-    if (!(await d.count().catch(() => 0))) return;
+    if (!(await d.count().catch(() => 0))) { st.seen = 0; return; }
     const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 300);
     if (!t) return;
     if (/limit|too many|reached|come back|try again later/i.test(t) && !/cookie/i.test(t))
       await this.fail(page, "limit", "chatgpt.com guest limit: " + t.slice(0, 160), "ratelimit");
     await dismissPopups(page);
-    if (/log ?in|sign ?up/i.test(t) && !/cookie/i.test(t) && ++st.dlg >= 4)
-      await this.fail(page, "loginwall", "chatgpt.com baar-baar login/sign up maang raha hai. Thodi der baad try karo", "ratelimit");
+    try { await page.locator('a:has-text("Stay logged out"), button:has-text("Stay logged out"), [role="dialog"] button[aria-label*="Close" i]').first().click({ timeout: 1500 }); } catch {}
+    if (/log ?in|sign ?up/i.test(t) && !/cookie/i.test(t)) {
+      if (!st.seen) st.seen = Date.now();
+      if (Date.now() - st.seen > 8000)
+        await this.fail(page, "loginwall", "chatgpt.com login dialog band nahi hua | dialog: " + t.slice(0, 200), "ratelimit");
+    }
   }
 
   // messages (OpenAI style) -> OpenAI chat.completion JSON string
@@ -289,7 +294,7 @@ export class CgptClient {
       }
 
       // jawab aane tak ruko: DOM me text thehar jaye
-      const st = { dlg: 0 };
+      const st = { seen: 0 };
       let last = "", stable = 0, started = false, tick = 0;
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
