@@ -24,10 +24,25 @@ const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
 // page ke selectors - perplexity badle to sirf yahan theek karo
 const SEL = {
-  input: '#ask-input, div[contenteditable="true"][role="textbox"], textarea[placeholder], div[contenteditable="true"]',
+  input: '#ask-input, [data-lexical-editor="true"], div[contenteditable="true"][role="textbox"], div[contenteditable="true"], [role="textbox"], textarea',
   answer: '[id^="markdown-content-"], div.prose',
   stop: 'button[aria-label*="Stop" i]',
 };
+
+// cookie / login / "continue" popups jo input ko dhak sakte hain
+async function dismissPopups(page) {
+  try { await page.keyboard.press("Escape"); } catch {}
+  for (const name of [/^accept( all)?$/i, /^i agree$/i, /^got it$/i, /^continue as guest$/i, /^stay logged out$/i, /^maybe later$/i, /^close$/i, /^skip$/i]) {
+    try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 1500 }); } catch {}
+  }
+}
+// page kya dikha raha hai - error message me jata hai (API ke 502 me bhi dikhega)
+async function pageInfo(page) {
+  const title = await page.title().catch(() => "");
+  const body = (await page.innerText("body").catch(() => "")).replace(/\s+/g, " ").slice(0, 220);
+  const n = await page.evaluate(() => ({ ce: document.querySelectorAll('[contenteditable]').length, ta: document.querySelectorAll('textarea').length, inp: document.querySelectorAll('input').length })).catch(() => ({}));
+  return `url=${page.url()} | title=${title} | ce=${n.ce} ta=${n.ta} input=${n.inp} | body: ${body}`;
+}
 
 class PplxError extends Error {
   constructor(msg, kind = "error") { super(msg); this.kind = kind; }
@@ -172,13 +187,22 @@ export class PplxClient {
       });
       await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(30000, timeoutMs) });
 
+      await page.waitForTimeout(2500);
+      await dismissPopups(page);
       const box = page.locator(SEL.input).first();
-      try { await box.waitFor({ state: "visible", timeout: 20000 }); }
+      try { await box.waitFor({ state: "visible", timeout: 25000 }); }
       catch {
-        await this.debug(page, "no-input");
-        const body = (await page.innerText("body").catch(() => "")).toLowerCase();
-        if (/verify you are human|just a moment|captcha/.test(body)) throw new PplxError("perplexity.ai bot check (challenge)", "challenge");
-        throw new PplxError("perplexity.ai input box nahi mila", "error");
+        await dismissPopups(page); // ek aur koshish
+        try { await box.waitFor({ state: "visible", timeout: 8000 }); }
+        catch {
+          const info = await pageInfo(page);
+          console.log("pplx no-input:", info);
+          await this.debug(page, "no-input");
+          const low = info.toLowerCase();
+          if (/verify you are human|just a moment|captcha|security verification|checking your browser|cloudflare/.test(low))
+            throw new PplxError("perplexity.ai bot check (headless block?) DUCK_HEADED=1 try karo | " + info.slice(0, 380), "challenge");
+          throw new PplxError("perplexity.ai input box nahi mila | " + info.slice(0, 380), "error");
+        }
       }
       await box.click();
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
