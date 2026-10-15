@@ -30,6 +30,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}td,th{text-align:left;p
 <div class="card"><h2>Last 24 hours</h2><div class="ch" id="ch"></div><div class="row m"><span>24h pehle</span><span>abhi</span></div></div>
 <div class="card"><div class="row"><h2 style="margin:0">API Keys</h2><button class="p" onclick="op()">+ New key</button></div><div id="ks"></div></div>
 <div class="card"><h2>Models (total requests)</h2><div class="sc"><table id="mt"></table></div></div>
+<div class="card"><div class="row"><h2 style="margin:0">AI ke liye guide</h2><button class="p" onclick="cp()">Copy</button></div><p class="m">Ye poora text kisi bhi AI ko paste kar do, use project bhejne ki zaroorat nahi: wo samajh jayega kaunsa model, kahan aur kaisi JSON request bhejni hai.</p><textarea id="gd" readonly rows="16" style="width:100%;font:12px/1.4 ui-monospace,Menlo,monospace;border:1px solid var(--b);border-radius:8px;padding:8px"></textarea></div>
 <div class="card"><h2>Recent requests</h2><div class="sc"><table id="lt"></table></div></div>
 </div></div>
 <div id="md"><div><h1 style="font-size:16px">New API key</h1>
@@ -48,7 +49,7 @@ function login(){T=$("pw").value.trim();localStorage.setItem("ak",T);load()}
 function logout(){localStorage.removeItem("ak");T="";$("app").hidden=true;$("lg").hidden=false}
 function ago(t){if(!t)return"kabhi nahi";var s=(Date.now()-t)/1e3;return s<60?Math.floor(s)+"s pehle":s<3600?Math.floor(s/60)+"m pehle":s<86400?Math.floor(s/3600)+"h pehle":Math.floor(s/86400)+"d pehle"}
 function lf(k){if(!k.expiresAt)return"hamesha";var d=k.expiresAt-Date.now();return d<=0?"expire ho gayi":d<864e5?Math.ceil(d/36e5)+" ghante bache":Math.ceil(d/864e5)+" din bache"}
-async function load(){if(!T)return;try{D=await api("list")}catch(e){return}$("lg").hidden=true;$("app").hidden=false;draw()}
+async function load(){if(!T)return;try{D=await api("list")}catch(e){return}$("lg").hidden=true;$("app").hidden=false;draw();if(!window.GD){window.GD=1;guide()}}
 function draw(){var K=D.keys,td=0,tt=0,er=0,M={};
 K.forEach(function(k){td+=k.today;tt+=k.total;er+=k.err||0;for(var m in k.models)M[m]=(M[m]||0)+k.models[m]});
 var act=K.filter(function(k){return!k.disabled&&!(k.expiresAt&&k.expiresAt<Date.now())}).length;
@@ -73,6 +74,60 @@ function op(){$("md").style.display="flex"}function cl(){$("md").style.display="
 async function mk(){await api("create",{name:$("n").value||"key",days:+$("dy").value,rpm:+$("rm").value,rpd:+$("rd").value});cl();$("n").value="";load()}
 async function ed(i){var k=gk(i),a=prompt("Requests/minute limit (0=unlimited)",k.rpm||0);if(a===null)return;var b=prompt("Requests/din limit (0=unlimited)",k.rpd||0);if(b===null)return;
 var d=prompt("Ab se kitne din chalegi? (0=hamesha, khali=badlo mat)","");var u={id:i,rpm:+a,rpd:+b};if(d)u.days=+d;await api("update",u);load()}
+async function guide(){
+var o=location.origin,ms=[];
+try{var r=await fetch("/v1/models");ms=(await r.json()).data||[]}catch(e){}
+var dk=[],fr=[];
+ms.forEach(function(m){if(m.owned_by=="duck.ai")dk.push(m.id+(m.free===false?" (paid)":""));else if(m.owned_by!="jaat")fr.push(m.id)});
+var J=function(x){return JSON.stringify(x)};
+var tl=[{type:"function",function:{name:"get_weather",description:"Get weather of a city",parameters:{type:"object",properties:{city:{type:"string"}},required:["city"]}}}];
+var L=[
+"JAAT API - OpenAI + Anthropic compatible proxy. Use it exactly like the OpenAI / Anthropic API, only BASE_URL and key differ.",
+"BASE_URL: "+o,
+"AUTH: header  Authorization: Bearer YOUR_API_KEY   (or  x-api-key: YOUR_API_KEY). Read the key from an env var, never hardcode it.",
+"",
+"ENDPOINTS",
+"  GET  /v1/models              list of model ids",
+"  POST /v1/chat/completions    OpenAI chat format (stream, tools, legacy functions)",
+"  POST /v1/messages            Anthropic format (stream, tools)",
+"  POST /v1/responses           OpenAI Responses format (stream, tools)",
+"  POST /v1/images/generations  NOT supported yet (returns 501)",
+"",
+"MODELS (put the id in the \\"model\\" field)",
+"  default: jaat-default (used for unknown model names)",
+"  duck.ai models (best: tools + streaming + conversation_id): "+(dk.join(", ")||"gpt-5.4-mini, claude-haiku-4-5, claude-sonnet-4-6, ..."),
+"  aliases that map to duck.ai: claude-sonnet, claude-haiku, claude-opus, gpt-4o, gpt-4o-mini, gpt-5, duck-auto (any claude-* / gpt-* name also works)",
+"  free provider models (each name is one provider, tools pass through only if that provider supports them): "+(fr.join(", ")||"see GET /v1/models"),
+"",
+"1) CHAT (non-stream)  POST "+o+"/v1/chat/completions",
+J({model:"claude-sonnet",messages:[{role:"system",content:"You are helpful."},{role:"user",content:"Hello"}]}),
+"   reply: choices[0].message.content",
+"",
+"2) STREAM: same body + \\"stream\\":true  -> Server-Sent Events, lines  data: {chunk}  (choices[0].delta.content) and finally  data: [DONE]",
+"",
+"3) TOOLS / FUNCTION CALLING (chat completions)",
+J({model:"claude-sonnet",messages:[{role:"user",content:"Weather in Delhi?"}],tools:tl,tool_choice:"auto"}),
+"   if the model wants a tool: message.content=null, message.tool_calls[{id,type:function,function:{name,arguments(JSON string)}}], finish_reason=\\"tool_calls\\".",
+"   then run the tool yourself and send back the history + the assistant tool_calls message + a tool message:",
+J({role:"tool",tool_call_id:"CALL_ID_FROM_REPLY",content:"{\\"temp\\":31}"}),
+"   tool_choice: \\"auto\\" | \\"none\\" | \\"required\\" | {\\"type\\":\\"function\\",\\"function\\":{\\"name\\":\\"get_weather\\"}}",
+"",
+"4) FASTER FOLLOW-UPS (session reuse, duck.ai models only): add \\"conversation_id\\":\\"my-chat-1\\" (or header x-conversation-id). Always send the FULL message history, unchanged, plus the new turn. If history changes it silently starts a fresh chat.",
+"",
+"5) ANTHROPIC FORMAT  POST "+o+"/v1/messages  (max_tokens required)",
+J({model:"claude-sonnet",max_tokens:1024,system:"You are helpful.",messages:[{role:"user",content:"Hello"}]}),
+"   reply: content[0].text. Tools use input_schema / tool_use / tool_result blocks as in the official Anthropic API. \\"stream\\":true gives message_start ... message_stop events.",
+"",
+"6) RESPONSES FORMAT  POST "+o+"/v1/responses",
+J({model:"gpt-4o",instructions:"You are helpful.",input:"Hello"}),
+"   reply: output_text. input can also be a list of items incl. function_call / function_call_output.",
+"",
+"OPTIONAL FIELDS: reasoning_effort (low|medium|high), max_tokens, temperature.",
+"ERRORS: JSON  {\\"error\\":{\\"message\\":...,\\"type\\":...}}; 401 bad key, 429 rate/day limit of that key, 5xx upstream/duck.ai problem (just retry).",
+"NOTES: a request can take 3-20s (real browser behind it). Use a timeout of at least 90s. Streaming is real only for duck.ai models without tools; otherwise chunks arrive at the end."
+];
+$("gd").value=L.join("\\n")}
+function cp(){var t=$("gd");t.select();t.setSelectionRange(0,99999);try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand("copy")}}
 async function tg(i,v){await api("update",{id:i,disabled:v});load()}
 async function rs(i){if(confirm("Count zero kar du?")){await api("reset",{id:i});load()}}
 async function dl(i){if(confirm("Key delete kar du? Wapas nahi aayegi.")){await api("delete",{id:i});load()}}
