@@ -20,6 +20,7 @@ const BASE = process.env.PPLX_BASE || "https://www.perplexity.ai";
 export const DEFAULT_MODEL = "pplx-auto";
 const MAX_PAGES = Number(process.env.PPLX_MAX_PAGES || 2); // ek saath kitne chat
 const MAX_PROMPT = Number(process.env.PPLX_MAX_PROMPT || 12000);
+const WARM_MAX_MS = Number(process.env.PPLX_WARM_MAX_MS || 120000); // garam page ki umar
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
 // page ke selectors - perplexity badle to sirf yahan theek karo
@@ -38,7 +39,7 @@ async function dismissPopups(page) {
 }
 // Cloudflare "Just a moment..." challenge: kuch der ruko (headed Chrome me aksar khud paas ho jata hai),
 // aur turnstile checkbox dikhe to use click karo. True = page aage badh gaya.
-async function passChallenge(page, ms = 35000) {
+async function passChallenge(page, ms = 22000) {
   const isChallenge = async () => {
     const title = (await page.title().catch(() => "")).toLowerCase();
     if (/just a moment|attention required|security verification/.test(title)) return true;
@@ -161,6 +162,7 @@ export class PplxClient {
   constructor() {
     this.browser = null; this.ctx = null; this.starting = null;
     this.active = 0; this.waiters = [];
+    this.warm = null; // pehle se tayyar page (promise)
   }
 
   async ensure() {
@@ -196,30 +198,18 @@ export class PplxClient {
     } catch {}
   }
 
-  // messages (OpenAI style) -> OpenAI chat.completion JSON string
-  async chat({ model, messages }, timeoutMs = 100000) {
-    const prompt = flatten(messages).slice(-MAX_PROMPT);
-    if (!prompt.trim()) throw new PplxError("empty prompt", "bad_request");
-    await this.ensure();
-    await this.slot();
-    const deadline = Date.now() + timeoutMs;
-    let page;
+  // naya page kholo, challenge paar karo, input box tak pahuncho. Fail hone par saaf error.
+  async open(budgetMs = 60000) {
+    const page = await this.ctx.newPage();
     try {
-      page = await this.ctx.newPage();
-      let sse = "";
-      page.on("response", async (r) => {
-        try { if (/perplexity_ask/.test(r.url()) && r.request().method() === "POST") sse = await r.text(); } catch {}
-      });
-      await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(30000, timeoutMs) });
-
-      await page.waitForTimeout(2500);
+      await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(20000, budgetMs) });
       await passChallenge(page);
       await dismissPopups(page);
       const box = page.locator(SEL.input).first();
-      try { await box.waitFor({ state: "visible", timeout: 25000 }); }
+      try { await box.waitFor({ state: "visible", timeout: 10000 }); }
       catch {
         await dismissPopups(page); // ek aur koshish
-        try { await box.waitFor({ state: "visible", timeout: 8000 }); }
+        try { await box.waitFor({ state: "visible", timeout: 4000 }); }
         catch {
           const info = await pageInfo(page);
           console.log("pplx no-input:", info);
@@ -230,6 +220,35 @@ export class PplxClient {
           throw new PplxError("perplexity.ai input box nahi mila | " + info.slice(0, 380), "error");
         }
       }
+      return { page, box, t: Date.now() };
+    } catch (e) { try { await page.close(); } catch {} throw e; }
+  }
+
+  // agli request ke liye ek page pehle se garam rakho (background me)
+  prewarm() {
+    if (this.warm || !this.ctx) return;
+    this.warm = this.open(45000).catch((e) => { console.log("pplx prewarm fail:", e.message.slice(0, 120)); return null; });
+  }
+
+  // messages (OpenAI style) -> OpenAI chat.completion JSON string
+  async chat({ model, messages }, timeoutMs = 100000) {
+    const prompt = flatten(messages).slice(-MAX_PROMPT);
+    if (!prompt.trim()) throw new PplxError("empty prompt", "bad_request");
+    await this.ensure();
+    await this.slot();
+    const deadline = Date.now() + timeoutMs;
+    let h = null;
+    try {
+      // garam page ho (aur 2 min se purana na ho) to wahi, warna naya
+      if (this.warm) { const w = await this.warm; this.warm = null; if (w && Date.now() - w.t < WARM_MAX_MS) h = w; else if (w) { try { await w.page.close(); } catch {} } }
+      if (!h) h = await this.open(Math.min(60000, timeoutMs));
+      const { page, box } = h;
+      this.prewarm(); // agli request ke liye abhi se tayyari (is page se alag)
+
+      let sse = "";
+      page.on("response", async (r) => {
+        try { if (/perplexity_ask/.test(r.url()) && r.request().method() === "POST") sse = await r.text(); } catch {}
+      });
       await box.click();
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
@@ -238,18 +257,15 @@ export class PplxClient {
       // jawab aane tak ruko: SSE mile ya DOM me text thehar jaye
       let last = "", stable = 0, started = false;
       while (Date.now() < deadline) {
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
-        if (net && sse) {
-          // SSE poora (response() sirf poora body hone par fire hota hai)
-          return completion(model || DEFAULT_MODEL, net.trim());
-        }
+        if (net && sse) return completion(model || DEFAULT_MODEL, net.trim()); // SSE poora aate hi turant
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
         const txt = n ? (await els.nth(n - 1).innerText().catch(() => "")).trim() : "";
         if (txt) started = true;
         const generating = (await page.locator(SEL.stop).count().catch(() => 0)) > 0;
-        if (txt && txt === last && !generating) { if (++stable >= 3) return completion(model || DEFAULT_MODEL, txt); }
+        if (txt && txt === last && !generating) { if (++stable >= 4) return completion(model || DEFAULT_MODEL, txt); } // ~1.4s same text
         else stable = 0;
         last = txt;
       }
@@ -257,7 +273,7 @@ export class PplxClient {
       if (last) return completion(model || DEFAULT_MODEL, last); // adhura hi sahi
       throw new PplxError("perplexity.ai timeout", "timeout");
     } finally {
-      try { await page?.close(); } catch {}
+      try { await h?.page?.close(); } catch {}
       this.free();
     }
   }
@@ -265,6 +281,7 @@ export class PplxClient {
   async warmup() { try { await this.ensure(); } catch (e) { console.log("pplx warmup fail:", e.message); } }
 
   async close() {
+    try { const w = this.warm ? await this.warm : null; this.warm = null; await w?.page?.close(); } catch {}
     try { await this.browser?.close(); } catch {}
     this.browser = null; this.ctx = null; this.starting = null;
   }
