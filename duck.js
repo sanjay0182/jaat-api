@@ -640,7 +640,7 @@ export class DuckClient {
         if (st.done) {
           const ev = parseLine(buf); if (ev && ev.message) { out += ev.message; emit(ev.message); }
           if (!saw) { await this.debug(page, `r${id}-empty`); throw new DuckError("duck.ai ne bina jawab ke stream band kar di"); }
-          if (raw) return rawAll; // image: text nahi, poora raw response caller parse karega
+          if (raw) { ok = true; return rawAll; } // image: text nahi, poora raw response caller parse karega (hold wali page khuli rehti hai)
           if (!out.trim()) throw new DuckError("duck.ai ka jawab khali aaya");
           ok = true;
           return out.trim();
@@ -667,24 +667,31 @@ export class DuckClient {
     } catch {}
   }
 
-  // duck.ai image generation. Chat jaisa hi page-send, bas model body-rewrite se IMAGE_MODEL ho jata hai.
-  // Return: JSON string {b64_json, mime} ya {url}. Image na mile to asli raw head log hota hai (fake image kabhi nahi).
+  // ---- image generation ----------------------------------------------------------
+  // Route A (default, behtar quality): duck.ai ke normal chat model se "Generate an image: ..." bolo. duck.ai apna native image tool
+  //   (app me "GPT Image 2") chalata hai; result page me <img> banke aata hai, wahin se bytes uthate hain (protocol par nirbhar nahi).
+  // Route B (fallback): body rewrite se model "image-generation" (purana, kam quality).
+  // Return: JSON string {b64_json, mime} ya {url}. Image na mile to error (fake image kabhi nahi).
   async image(prompt, timeoutMs = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000)) {
     await this.ensure();
     await this.slot();
-    const id = ++this.n;
+    const t0 = Date.now();
+    const text = String(prompt || "").slice(0, 3800);
     try {
-      let raw;
+      let found = null, errA = "";
       try {
-        raw = await this.#send(id, String(prompt || "").slice(0, 4000), timeoutMs, { model: IMAGE_MODEL }, null, null, null, true);
+        found = await this.#imageViaChat(++this.n, "Generate an image: " + text, Math.min(95000, timeoutMs));
       } catch (e) {
-        if (e.kind === "rewrite") throw new DuckError("duck.ai ne image model (" + IMAGE_MODEL + ") wali body reject ki (ERR_CHALLENGE)", "rewrite");
-        throw e;
+        errA = e.message;
+        if (e.kind === "ban" || e.kind === "ratelimit") throw e;
+        console.log("duck-image: chat-tool route fail ->", e.message);
       }
-      let found = findImage(raw);
       if (!found) {
-        console.log("duck-image: image nahi mili. sent:", JSON.stringify(this.lastSent || null), "raw head:", raw.replace(/[A-Za-z0-9+\/=]{200,}/g, "<b64>").slice(0, 800));
-        throw new DuckError("duck.ai ke response me image nahi mili (runner log me raw head dekho)", "noimage");
+        try {
+          found = await this.#imageViaModel(++this.n, text, Math.max(30000, timeoutMs - (Date.now() - t0)));
+        } catch (e) {
+          throw new DuckError("chat-tool route: " + errA + " | model route: " + e.message, e.kind || "noimage");
+        }
       }
       if (found.url && !found.b64) {
         try {
@@ -694,6 +701,76 @@ export class DuckClient {
       }
       return JSON.stringify(found.b64 ? { b64_json: found.b64, mime: found.mime || mimeOfB64(found.b64) } : { url: found.url });
     } finally { this.free(); }
+  }
+
+  async #imageViaChat(id, prompt, ms) {
+    const hold = {};
+    let page = null;
+    try {
+      const raw = await this.#send(id, prompt, ms, null, null, null, hold, true);
+      page = hold.page;
+      let found = findImage(raw);
+      const until = Date.now() + 40000; // stream khatam ho gayi par image render hone me der ho sakti hai
+      while (!found && Date.now() < until) {
+        found = await this.#domImage(page);
+        if (!found) await page.waitForTimeout(1000);
+      }
+      if (!found) { await this.#imgDiag(page, raw); throw new DuckError("image page me nahi aayi (model ne shayad sirf text diya)", "noimage"); }
+      return found;
+    } finally { if (page) await page.close().catch(() => {}); }
+  }
+
+  async #imageViaModel(id, prompt, ms) {
+    try {
+      const raw = await this.#send(id, prompt, ms, { model: IMAGE_MODEL }, null, null, null, true);
+      const found = findImage(raw);
+      if (!found) {
+        console.log("duck-image: model route me image nahi mili. sent:", JSON.stringify(this.lastSent || null), "raw head:", raw.replace(/[A-Za-z0-9+\/=]{200,}/g, "<b64>").slice(0, 600));
+        throw new DuckError("response me image nahi mili", "noimage");
+      }
+      return found;
+    } catch (e) {
+      if (e.kind === "rewrite") throw new DuckError("image model (" + IMAGE_MODEL + ") wali body reject hui (ERR_CHALLENGE)", "rewrite");
+      throw e;
+    }
+  }
+
+  // page me sabse nayi badi <img> (blob:/data:/https) ke bytes. Logo/icon chhote hote hain, isliye 400px se chhoti skip.
+  async #domImage(page) {
+    try {
+      return await page.evaluate(async () => {
+        const imgs = [...document.querySelectorAll("img")].filter((i) => i.complete && i.naturalWidth >= 400 && i.naturalHeight >= 400).reverse();
+        for (const i of imgs) {
+          const src = i.currentSrc || i.src || "";
+          if (!src || /\.svg(\?|$)/i.test(src)) continue;
+          try {
+            const r = await fetch(src);
+            if (!r.ok) continue;
+            const b = new Uint8Array(await r.arrayBuffer());
+            if (b.length < 5000) continue;
+            let s = "";
+            for (let k = 0; k < b.length; k += 0x8000) s += String.fromCharCode.apply(null, b.subarray(k, k + 0x8000));
+            const ct = (r.headers.get("content-type") || "").split(";")[0];
+            return { b64: btoa(s), mime: ct.startsWith("image/") ? ct : "" };
+          } catch {}
+        }
+        return null;
+      }).then((r) => (r ? { b64: r.b64, mime: r.mime || mimeOfB64(r.b64) } : null));
+    } catch { return null; }
+  }
+
+  // image na mile to log me page ki halat (agli iteration me yahi dekhna hai)
+  async #imgDiag(page, raw) {
+    try {
+      const info = await page.evaluate(() => ({
+        imgs: [...document.querySelectorAll("img")].map((i) => ({ src: (i.currentSrc || i.src || "").slice(0, 90), w: i.naturalWidth, h: i.naturalHeight })).slice(-8),
+        canvas: document.querySelectorAll("canvas").length,
+        btns: [...document.querySelectorAll("button")].map((b) => (b.getAttribute("aria-label") || b.innerText || "").trim().slice(0, 30)).filter(Boolean).slice(0, 25),
+        text: (document.body.innerText || "").slice(-400),
+      }));
+      console.log("duck-image diag:", JSON.stringify(info), "| raw head:", String(raw || "").replace(/[A-Za-z0-9+\/=]{200,}/g, "<b64>").slice(0, 500));
+      await this.debug(page, "image-none");
+    } catch {}
   }
 
   async close() {
