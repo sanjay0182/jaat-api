@@ -158,6 +158,44 @@ export class DuckError extends Error {
   constructor(msg, kind = "error") { super(msg); this.kind = kind; }
 }
 
+// ---- image generation helpers ---------------------------------------------------
+// p2d-duck ke hisaab se duck.ai image model id "image-generation" hai (usi chat endpoint par). Response ka exact shape verified nahi,
+// isliye tolerant extraction: data URL / markdown image / http image url / lambi base64 string.
+const IMAGE_MODEL = process.env.DUCK_IMAGE_MODEL || "image-generation";
+const mimeOfB64 = (b) => (b.startsWith("/9j/") ? "image/jpeg" : b.startsWith("UklGR") ? "image/webp" : b.startsWith("R0lGOD") ? "image/gif" : "image/png");
+function imgFromText(s) {
+  let m = /data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+\/=]+)/.exec(s);
+  if (m) return { b64: m[2], mime: "image/" + (m[1] === "jpg" ? "jpeg" : m[1]) };
+  m = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/.exec(s);
+  if (m) return { url: m[1] };
+  const flat = s.replace(/\s+/g, "");
+  if (flat.length > 2000 && /^[A-Za-z0-9+\/]+={0,2}$/.test(flat) && /^(iVBOR|\/9j\/|UklGR|R0lGOD)/.test(flat)) return { b64: flat, mime: mimeOfB64(flat) };
+  return null;
+}
+export function findImage(raw) {
+  const t = String(raw || "");
+  const msg = [];
+  let hit = null;
+  const walk = (v, k, d) => {
+    if (hit || d > 6 || v == null) return;
+    if (typeof v === "string") {
+      if (/^https?:\/\/\S+$/.test(v) && (/\.(png|jpe?g|webp)(\?|$)/i.test(v) || /image|img/i.test(k))) hit = { url: v };
+      else if (k !== "message" && (v.length > 2000 || v.includes("data:image"))) hit = imgFromText(v);
+      return;
+    }
+    if (typeof v !== "object") return;
+    for (const [kk, vv] of Object.entries(v)) walk(vv, kk, d + 1);
+  };
+  for (const line of t.split("\n")) {
+    const ev = parseLine(line);
+    if (!ev) continue;
+    if (typeof ev.message === "string") msg.push(ev.message); // base64 / data URL kai events me tuta ho sakta hai: message jodke dekho
+    walk(ev, "", 0);
+    if (hit) return hit;
+  }
+  return imgFromText(msg.join("")) || imgFromText(t);
+}
+
 // ---- page me daalne wali scripts (duckapi se) ----------------------------------
 const INIT_SCRIPT = `
 Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
@@ -167,7 +205,7 @@ window.__duckai = {chunks:[], done:false, err:null, status:0, rewrite:null, rewr
   window.fetch = async function(u,o){
     o = o || {};
     const url = typeof u === 'string' ? u : (u && u.url) || '';
-    if(url.includes('/duckchat/v1/chat')){
+    if(url.includes('/duckchat/v1/chat') || url.includes('/duckchat/v1/image')){
       const D = window.__duckai;
       D.chunks = []; D.done = false; D.err = null; D.status = 0;
       const rw = D.rewrite; D.rewrite = null;
@@ -549,7 +587,7 @@ export class DuckClient {
     } catch (e) { console.log("duck model discovery skipped:", e.message); return []; }
   }
 
-  async #send(id, prompt, timeoutMs, rewrite, onDelta, reusePage = null, hold = null) {
+  async #send(id, prompt, timeoutMs, rewrite, onDelta, reusePage = null, hold = null, raw = false) {
     const deadline = Date.now() + timeoutMs;
     let started = false; // pehla delta bhejne se pehle shuruaati whitespace hata do (final out.trim() jaisa)
     const emit = (t) => {
@@ -579,7 +617,7 @@ export class DuckClient {
       }
       if (!sent) await ta.press("Enter");
 
-      let idx = 0, buf = "", out = "", saw = false;
+      let idx = 0, buf = "", out = "", saw = false, rawAll = ""; // rawAll: sirf raw mode (image) me poora response
       while (Date.now() < deadline) {
         const st = await page.evaluate(POLL_JS, idx);
         idx = st.n;
@@ -592,6 +630,7 @@ export class DuckClient {
         }
         if (st.text) {
           saw = true; buf += st.text;
+          if (raw) rawAll += st.text;
           let i;
           while ((i = buf.indexOf("\n")) >= 0) {
             const ev = parseLine(buf.slice(0, i)); buf = buf.slice(i + 1);
@@ -601,6 +640,7 @@ export class DuckClient {
         if (st.done) {
           const ev = parseLine(buf); if (ev && ev.message) { out += ev.message; emit(ev.message); }
           if (!saw) { await this.debug(page, `r${id}-empty`); throw new DuckError("duck.ai ne bina jawab ke stream band kar di"); }
+          if (raw) return rawAll; // image: text nahi, poora raw response caller parse karega
           if (!out.trim()) throw new DuckError("duck.ai ka jawab khali aaya");
           ok = true;
           return out.trim();
@@ -625,6 +665,35 @@ export class DuckClient {
         }
       }
     } catch {}
+  }
+
+  // duck.ai image generation. Chat jaisa hi page-send, bas model body-rewrite se IMAGE_MODEL ho jata hai.
+  // Return: JSON string {b64_json, mime} ya {url}. Image na mile to asli raw head log hota hai (fake image kabhi nahi).
+  async image(prompt, timeoutMs = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000)) {
+    await this.ensure();
+    await this.slot();
+    const id = ++this.n;
+    try {
+      let raw;
+      try {
+        raw = await this.#send(id, String(prompt || "").slice(0, 4000), timeoutMs, { model: IMAGE_MODEL }, null, null, null, true);
+      } catch (e) {
+        if (e.kind === "rewrite") throw new DuckError("duck.ai ne image model (" + IMAGE_MODEL + ") wali body reject ki (ERR_CHALLENGE)", "rewrite");
+        throw e;
+      }
+      let found = findImage(raw);
+      if (!found) {
+        console.log("duck-image: image nahi mili. sent:", JSON.stringify(this.lastSent || null), "raw head:", raw.replace(/[A-Za-z0-9+\/=]{200,}/g, "<b64>").slice(0, 800));
+        throw new DuckError("duck.ai ke response me image nahi mili (runner log me raw head dekho)", "noimage");
+      }
+      if (found.url && !found.b64) {
+        try {
+          const r = await fetch(found.url);
+          if (r.ok) { const b = Buffer.from(await r.arrayBuffer()).toString("base64"); found = { b64: b, mime: (r.headers.get("content-type") || "").startsWith("image/") ? r.headers.get("content-type") : mimeOfB64(b) }; }
+        } catch {}
+      }
+      return JSON.stringify(found.b64 ? { b64_json: found.b64, mime: found.mime || mimeOfB64(found.b64) } : { url: found.url });
+    } finally { this.free(); }
   }
 
   async close() {

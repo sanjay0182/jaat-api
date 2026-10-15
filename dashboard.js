@@ -91,7 +91,7 @@ var L=[
 "  POST /v1/chat/completions    OpenAI chat format (stream, tools, legacy functions)",
 "  POST /v1/messages            Anthropic format (stream, tools)",
 "  POST /v1/responses           OpenAI Responses format (stream, tools)",
-"  POST /v1/images/generations  NOT supported yet (returns 501)",
+"  POST /v1/images/generations  duck.ai image (1 image/call, b64_json)",
 "",
 "MODELS (put the id in the \\"model\\" field)",
 "  default: jaat-default (used for unknown model names)",

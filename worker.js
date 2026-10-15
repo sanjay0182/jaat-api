@@ -155,7 +155,7 @@ export class Hub {
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
       const fp = provider === "free" ? FREE_PROVIDERS.find((x) => x.name === name) : null;
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
-      const label = provider === "free" ? name : provider === "duck" ? model : "vireonix";
+      const label = provider === "free" ? name : provider === "duck" ? model : provider === "duck-image" ? "duck-image" : "vireonix";
 
       const wait = provider === "duck-image" ? Number(this.env.DUCK_IMAGE_WAIT_MS || 240000) : provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000;
 
@@ -580,9 +580,19 @@ async function handle(req, env) {
   }
 
   if (u.pathname === "/v1/images/generations") {
-    const g = await gate(false); if (!g.ok) return deny(g); // unsupported hai, isliye request count nahi hoti
-    // Native duck.ai image tool ke result transport ka reliable selector abhi verified nahi hai.
-    return Response.json({ error: { message: "Image generation unavailable: duck.ai native image tool/result stream is not verified in this build; no fake image was returned.", type: "unsupported_capability" } }, { status: 501 });
+    let a; try { a = await req.json(); } catch { return Response.json({ error: { message: "bad json", type: "invalid_request_error" } }, { status: 400 }); }
+    const prompt = String(a.prompt || "").trim();
+    if (!prompt) return Response.json({ error: { message: "prompt required", type: "invalid_request_error" } }, { status: 400 });
+    const g = await gate(true); if (!g.ok) return deny(g);
+    const t0 = Date.now();
+    // duck.ai image model (runner me real Chrome). Ek call = ek image (n ignore; duck ki daily limit bachane ke liye)
+    const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify({ provider: "duck-image", model: "image-generation", body: JSON.stringify({ prompt: prompt.slice(0, 4000) }) }) });
+    await hub.fetch("https://hub/record", { method: "POST", body: JSON.stringify({ id: g.id, model: "image-generation", provider: "duck-image", status: r.status, ms: Date.now() - t0 }) });
+    if (r.status !== 200) return r; // reply() ka 502/504 JSON seedha (asli error message ke saath)
+    let d; try { d = await r.json(); } catch { return Response.json({ error: { message: "bad image response from runner", type: "error" } }, { status: 502 }); }
+    const item = d.b64_json ? { b64_json: d.b64_json, ...(a.response_format === "url" ? { url: "data:" + (d.mime || "image/png") + ";base64," + d.b64_json } : {}) } : d.url ? { url: d.url } : null;
+    if (!item) return Response.json({ error: { message: "runner ne image nahi di", type: "error" } }, { status: 502 });
+    return Response.json({ created: Math.floor(Date.now() / 1000), data: [item] });
   }
 
   if (u.pathname === "/v1/chat/completions") {

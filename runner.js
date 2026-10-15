@@ -20,6 +20,7 @@ const MAX_TRIES = 1; // 1 = normal mode, ek request ke liye vireonix ko sirf ek 
 // duck.ai provider (real Chrome). Pehli duck request par hi chrome khulta hai.
 const duck = new DuckClient();
 const DUCK_TIMEOUT_MS = Number(process.env.DUCK_TIMEOUT_MS || 80000);
+const DUCK_IMAGE_TIMEOUT_MS = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000);
 
 const start = Date.now();
 duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
@@ -131,7 +132,8 @@ async function handle({ id, provider, name, body, stream }) {
       const canStream = sink && (!j.tools?.length || j.tool_choice === "none");
       data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort, conversation_id: j.conversation_id, tools: j.tools, tool_choice: j.tool_choice, legacy_fn: j.legacy_fn, onDelta: canStream ? sink.add : undefined }, DUCK_TIMEOUT_MS);
     } else if (provider === "duck-image") {
-      throw new Error("duck.ai native image tool ka page protocol abhi detect/verify nahi hua; image fake nahi banayi gayi");
+      const j = JSON.parse(body);
+      data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
     } else if (provider === "free") {
       const p = FREE_PROVIDERS.find((x) => x.name === name);
       if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
