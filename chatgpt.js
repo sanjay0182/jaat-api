@@ -203,7 +203,7 @@ export class CgptClient {
       try {
         const d = (e) => { try { return [e.tagName, e.getAttribute("aria-label") || "", e.getAttribute("data-testid") || "", (e.innerText || "").replace(/\s+/g, " ").slice(0, 40)].join("|"); } catch { return "?"; } };
         document.addEventListener("click", (e) => console.log("__cgpt click " + d(e.target)), true);
-        document.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape" || e.ctrlKey) console.log("__cgpt key " + e.key + (e.ctrlKey ? "+ctrl" : "") + (e.shiftKey ? "+shift" : "") + " on " + d(document.activeElement)); }, true);
+        document.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.ctrlKey) console.log("__cgpt key " + e.key + (e.ctrlKey ? "+ctrl" : "") + (e.shiftKey ? "+shift" : "") + " on " + d(document.activeElement)); }, true);
       } catch {}
     });
     return ctx;
@@ -282,9 +282,54 @@ export class CgptClient {
   // guest ka "Clear current chat?" dialog: hamari koi purani chat chahiye hi nahi (har request nayi chat),
   // isliye "Clear chat" dabana sahi hai. SIRF message bhejne se pehle (user bubble na ho) - warna apni chat mit jayegi.
   // "Log in" kabhi nahi dabta. True = dialog tha aur Clear chat dab gaya.
-  async clearChatDialog(page) {
+  async clearChatDialog(page, force = false) {
     try {
-      if (await page.locator(SEL.user).count().catch(() => 0)) return false; // hamara message ja chuka, kuch mat dabao
+      if (!force && (await page.locator(SEL.user).count().catch(() => 0))) return false; // hamara message ja chuka, kuch mat dabao (force sirf recovery me)
+      const d = page.locator(SEL.dialog).first();
+      if (!(await d.count())) return false;
+      const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ");
+      if (!/clear current chat/i.test(t)) return false;
+      const btn = d.locator("button, a, [role=button]").filter({ hasText: /^\s*clear chat\s*$/i }).first();
+      if (!(await btn.count())) return false;
+      await btn.click({ timeout: 3000 });
+      console.log("cgpt: 'Clear chat' dabaya (message bhejne se pehle)");
+      await page.waitForTimeout(900);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // network status: conversation POST par 429 = limit, 403 = block/sentinel, 401 = login wall
+  async checkNet(net, page) {
+    if (net.status === 429) await this.fail(page, "429", "chatgpt.com guest limit / too many requests (429). Thodi der baad try karo", "ratelimit");
+    if (net.status === 401) await this.fail(page, "401", "chatgpt.com login maang raha hai (guest limit). Thodi der baad try karo", "ratelimit");
+    if (net.status === 403) await this.fail(page, "403", "chatgpt.com ne request roki (Cloudflare/sentinel, shayad runner IP block). DUCK_HEADED=1 try karo", "challenge");
+  }
+
+  // dialog dikhe to: pehli baar buttons ka naam log + screenshot, Escape SIRF EK BAAR. Haar tabhi jab saaf limit text ho.
+  // st.open = abhi dialog khula hai ya nahi (recovery isi se chalti hai)
+  async checkDialog(page, st) {
+    const d = page.locator(SEL.dialog).first();
+    if (!(await d.count().catch(() => 0))) { st.open = false; st.dlgAt = 0; return; }
+    const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 300);
+    if (!t) { st.open = false; return; }
+    if (/limit|too many|reached|come back|try again later/i.test(t) && !/cookie/i.test(t))
+      await this.fail(page, "limit", "chatgpt.com guest limit: " + t.slice(0, 160), "ratelimit");
+    st.open = true; if (!st.dlgAt) st.dlgAt = Date.now();
+    if (!st.dlgText) {
+      st.dlgText = t;
+      const btns = await d.locator("button, a, [role=button]").evaluateAll((els) => els.map((e) => ((e.innerText || e.getAttribute("aria-label") || "icon") + "").replace(/\s+/g, " ").trim().slice(0, 30))).catch(() => []);
+      console.log("cgpt: dialog dikha:", t.slice(0, 120), "| buttons:", JSON.stringify(btns));
+      await this.debug(page, "dialog-seen");
+      try { await page.keyboard.press("Escape"); } catch {} // sirf ek baar
+    }
+  }
+
+  // guest ka "Clear current chat?" dialog: hamari koi purani chat chahiye hi nahi (har request nayi chat),
+  // isliye "Clear chat" dabana sahi hai. SIRF message bhejne se pehle (user bubble na ho) - warna apni chat mit jayegi.
+  // "Log in" kabhi nahi dabta. True = dialog tha aur Clear chat dab gaya.
+  async clearChatDialog(page, force = false) {
+    try {
+      if (!force && (await page.locator(SEL.user).count().catch(() => 0))) return false; // hamara message ja chuka, kuch mat dabao (force sirf recovery me)
       const d = page.locator(SEL.dialog).first();
       if (!(await d.count())) return false;
       const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ");
@@ -367,7 +412,7 @@ export class CgptClient {
       }
 
       // jawab aane tak ruko: DOM me text thehar jaye
-      const st = { dlgText: "" };
+      const st = { dlgText: "", open: false, dlgAt: 0, recov: 0 };
       const sentAt = Date.now();
       let last = "", stable = 0, started = false, tick = 0, lastLog = 0;
       while (Date.now() < deadline) {
@@ -386,6 +431,12 @@ export class CgptClient {
           await this.fail(page, "noanswer", `chatgpt.com ${Math.round(NOANS_MS / 1000)}s me jawab shuru nahi hua | message_gaya=${u ? "haan" : "NAHI"} | dialog=${st.dlgText ? st.dlgText.slice(0, 120) : "nahi"} | ${info.slice(0, 200)}`, u ? "timeout" : "error");
         }
         if (!started || tick % 6 === 0) await this.checkDialog(page, st);
+        // recovery: "Clear current chat?" 5s se khula hai aur jawab shuru nahi hua -> Clear chat dabao, message dobara bhejo (max 2 baar)
+        if (!started && st.open && st.dlgAt && /clear current chat/i.test(st.dlgText) && Date.now() - st.dlgAt > 5000 && st.recov < 2) {
+          st.recov++; st.dlgAt = 0;
+          console.log("cgpt: dialog 5s se atka hai, Clear chat dabake dobara bhej raha hoon (recovery " + st.recov + ")");
+          if (await this.clearChatDialog(page, true)) { st.open = false; await sendOnce(); }
+        }
         tick++;
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
