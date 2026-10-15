@@ -157,7 +157,7 @@ export class Hub {
       const name = job.name; // free provider ka naam
       const model = String(job.model || "");
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
-      const pplxWait = Number(this.env.PPLX_WAIT_MS || 110000);
+      const pplxWait = Number(this.env.PPLX_WAIT_MS || 140000);
       const fp = provider === "free" ? FREE_PROVIDERS.find((x) => x.name === name) : null;
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
       const label = provider === "free" ? name : provider === "duck" ? model : provider === "duck-image" ? "duck-image" : provider === "perplexity" ? model : "vireonix";
