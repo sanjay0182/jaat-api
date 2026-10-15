@@ -253,6 +253,7 @@ export class CgptClient {
           throw new CgptError("chatgpt.com input box nahi mila | " + info.slice(0, 380), "error");
         }
       }
+      await this.clearChatDialog(page);
       return { page, box, ctx, t: Date.now() };
     } catch (e) { try { await page.close(); } catch {} if (FRESH) { try { await ctx.close(); } catch {} } throw e; }
   }
@@ -275,6 +276,25 @@ export class CgptClient {
     await this.debug(page, tag);
     await this.reset();
     throw new CgptError(msg, kind);
+  }
+
+  // guest ka "Clear current chat?" dialog: hamari koi purani chat chahiye hi nahi (har request nayi chat),
+  // isliye "Clear chat" dabana sahi hai. SIRF message bhejne se pehle (user bubble na ho) - warna apni chat mit jayegi.
+  // "Log in" kabhi nahi dabta. True = dialog tha aur Clear chat dab gaya.
+  async clearChatDialog(page) {
+    try {
+      if (await page.locator(SEL.user).count().catch(() => 0)) return false; // hamara message ja chuka, kuch mat dabao
+      const d = page.locator(SEL.dialog).first();
+      if (!(await d.count())) return false;
+      const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ");
+      if (!/clear current chat/i.test(t)) return false;
+      const btn = d.locator("button, a, [role=button]").filter({ hasText: /^\s*clear chat\s*$/i }).first();
+      if (!(await btn.count())) return false;
+      await btn.click({ timeout: 3000 });
+      console.log("cgpt: 'Clear chat' dabaya (message bhejne se pehle)");
+      await page.waitForTimeout(900);
+      return true;
+    } catch (e) { return false; }
   }
 
   // network status: conversation POST par 429 = limit, 403 = block/sentinel, 401 = login wall
@@ -322,18 +342,27 @@ export class CgptClient {
         } catch {}
       });
       await dismissPopups(page);
-      await box.click();
-      // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
-      await page.keyboard.insertText(prompt);
-      await page.waitForTimeout(400);
-      // Enter tabhi dabao jab textbox hi focused ho (nahi to Enter kisi aur button par lag sakta hai)
-      const inBox = await page.evaluate((sel) => { const a = document.activeElement; return !!a && !!a.closest && !!a.closest(sel); }, SEL.input).catch(() => false);
-      if (!inBox) { console.log("cgpt: textbox focused nahi tha, focus kar raha hoon"); try { await box.focus(); } catch {} }
-      await page.keyboard.press("Enter");
-      // Enter se message na gaya ho (user bubble nahi dikha) to send button dabao
-      await page.waitForTimeout(1500);
-      if (!(await page.locator(SEL.user).count().catch(() => 0)) && !net.status) {
-        try { await page.locator(SEL.send).first().click({ timeout: 3000 }); } catch {}
+      await this.clearChatDialog(page);
+      // message bhejo. Dialog beech me aa jaye to Clear chat dabake dobara bhejo (max 3 koshish)
+      const sendOnce = async () => {
+        await box.click();
+        const cur = (await box.innerText().catch(() => "")).trim();
+        // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa). Box me pehle se text ho to dobara mat daalo
+        if (!cur) await page.keyboard.insertText(prompt);
+        await page.waitForTimeout(400);
+        // Enter tabhi dabao jab textbox hi focused ho (nahi to Enter kisi aur button par lag sakta hai)
+        const inBox = await page.evaluate((sel) => { const a = document.activeElement; return !!a && !!a.closest && !!a.closest(sel); }, SEL.input).catch(() => false);
+        if (!inBox) { console.log("cgpt: textbox focused nahi tha, focus kar raha hoon"); try { await box.focus(); } catch {} }
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(1500);
+      };
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await sendOnce();
+        if (await this.clearChatDialog(page)) { console.log("cgpt: dialog aaya tha, dobara bhej raha hoon (koshish " + attempt + ")"); continue; }
+        if ((await page.locator(SEL.user).count().catch(() => 0)) || net.status) break; // message chala gaya
+        try { await page.locator(SEL.send).first().click({ timeout: 3000 }); } catch {} // Enter se nahi gaya to send button
+        await page.waitForTimeout(1200);
+        if ((await page.locator(SEL.user).count().catch(() => 0)) || net.status) break;
       }
 
       // jawab aane tak ruko: DOM me text thehar jaye
