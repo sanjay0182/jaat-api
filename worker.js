@@ -267,7 +267,10 @@ export class Hub {
     if (failed(out)) {
       const e = errInfo(out);
       headers["x-jaat-error"] = e.msg;
-      return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label } }), { status: 502, headers });
+      // error kind -> sahi HTTP status: ratelimit=429, challenge/ban/forbidden=403, timeout=504, baaki 502
+      const status = e.kind === "ratelimit" ? 429 : /^(challenge|ban|forbidden)$/.test(e.kind) ? 403 : e.kind === "timeout" ? 504 : 502;
+      if (status === 429) headers["retry-after"] = "60";
+      return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label } }), { status, headers });
     }
     return new Response(out, { headers });
   }

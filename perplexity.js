@@ -180,6 +180,12 @@ function cleanDom(t) {
   return out && kept.length < lines.length && kept.some((l) => /\s/.test(l.trim())) ? out : String(t || "").trim();
 }
 
+// Perplexity guest limit / login wall ("Sign up and repeat your request.") jawab nahi, error hai
+function isWall(t) {
+  const x = String(t || "").trim();
+  return x.length > 0 && x.length < 300 && /sign up|log ?in\b|create (an )?account|continue with (google|apple|email)|repeat your request|upgrade to/i.test(x);
+}
+
 function completion(model, text) {
   return JSON.stringify({
     id: "chatcmpl-pplx-" + Date.now().toString(36),
@@ -292,24 +298,34 @@ export class PplxClient {
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
-        if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
+        if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); await this.guard(net, page); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
         await hideChips(page);
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
         const txt = n ? (await els.nth(n - 1).innerText().catch(() => "")).trim() : "";
         if (txt) started = true;
         const generating = (await page.locator(SEL.stop).count().catch(() => 0)) > 0;
-        if (txt && txt === last && !generating) { if (++stable >= 4) { console.log("pplx: jawab DOM se; sse mila:", sse ? "haan, parse khali (" + sse.slice(0, 160).replace(/\s+/g, " ") + ")" : "nahi"); return completion(model || DEFAULT_MODEL, cleanDom(txt)); } } // ~1.4s same text
+        if (txt && txt === last && !generating) { if (++stable >= 4) { console.log("pplx: jawab DOM se; sse mila:", sse ? "haan, parse khali (" + sse.slice(0, 160).replace(/\s+/g, " ") + ")" : "nahi"); await this.guard(txt, page); return completion(model || DEFAULT_MODEL, cleanDom(txt)); } } // ~1.4s same text
         else stable = 0;
         last = txt;
       }
       await this.debug(page, started ? "partial" : "timeout");
-      if (last) return completion(model || DEFAULT_MODEL, cleanDom(last)); // adhura hi sahi
+      if (last) { await this.guard(last, page); return completion(model || DEFAULT_MODEL, cleanDom(last)); } // adhura hi sahi
       throw new PplxError("perplexity.ai timeout", "timeout");
     } finally {
       try { await h?.page?.close(); } catch {}
       this.free();
     }
+  }
+
+  // login wall / guest limit mila to error do (jawab bana ke mat bhejo) aur session reset karo
+  async guard(text, page) {
+    if (!isWall(text)) return;
+    console.log("pplx: guest limit / login wall:", String(text).trim().slice(0, 120));
+    await this.debug(page, "wall");
+    try { await this.ctx.clearCookies(); } catch {} // naya anonymous session agli baar
+    try { const w = this.warm ? await this.warm : null; this.warm = null; await w?.page?.close(); } catch {}
+    throw new PplxError("perplexity.ai guest limit (login/sign up maang raha hai). Thodi der baad try karo", "ratelimit");
   }
 
   async warmup() { try { await this.ensure(); } catch (e) { console.log("pplx warmup fail:", e.message); } }
