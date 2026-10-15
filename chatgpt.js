@@ -38,13 +38,35 @@ const SEL = {
   dialog: '[role="dialog"]',
 };
 
-// cookie / login / "stay logged out" popups jo input ko dhak sakte hain. "Log in"/"Sign up" kabhi click nahi hota.
+// Generic popup band karne wala: kisi bhi dialog/banner ka X (cross), "Continue on web", "Stay logged out",
+// "Not now" jaise buttons dabata hai. "Log in" / "Sign up" / "Clear chat" kabhi nahi dabta.
+// Page ka design badle tab bhi kaam kare, isliye naam-par-bharosa kam, X-button par zyada.
+async function closeOverlays(page) {
+  try {
+    return await page.evaluate(() => {
+      const txt = (e) => ((e.innerText || "") || e.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+      const OK = /^(stay logged out|stay signed out|continue (on|with|in) (the )?(web|browser)( instead)?|use (the )?web( version)?|not now|no,? thanks|maybe later|got it|okay,? let'?s go|dismiss|skip|reject (all|non-essential)|accept( all)?)$/i;
+      const BAD = /log ?in|sign ?up|clear chat|create account|continue with (google|apple|microsoft|phone|email)/i;
+      const cands = [...document.querySelectorAll("button, a, [role=button]")].filter((e) => e.offsetParent !== null);
+      for (const e of cands) { const t = txt(e); if (t && !BAD.test(t) && OK.test(t)) { e.click(); return "text:" + t; } }
+      const dlg = document.querySelector('[role="dialog"]');
+      if (dlg) {
+        const x = [...dlg.querySelectorAll('button, [role=button]')].find((e) => /close|dismiss|cancel/i.test((e.getAttribute("aria-label") || "") + " " + (e.getAttribute("data-testid") || "")));
+        if (x) { x.click(); return "x"; }
+        const ic = [...dlg.querySelectorAll("button")].find((e) => !txt(e) && e.querySelector("svg") && !BAD.test(e.getAttribute("aria-label") || ""));
+        if (ic) { ic.click(); return "icon"; }
+      }
+      return "";
+    });
+  } catch { return ""; }
+}
 async function dismissPopups(page) {
   try { await page.keyboard.press("Escape"); } catch {}
-  for (const name of [/^stay logged out$/i, /^reject (all|non-essential)$/i, /^accept all$/i, /^accept$/i, /^okay,? let'?s go$/i, /^got it$/i, /^maybe later$/i, /^dismiss$/i, /^skip$/i, /^close$/i, /^stay signed out$/i]) {
-    for (const role of ["button", "link"]) {
-      try { const b = page.getByRole(role, { name }).first(); if (await b.count()) await b.click({ timeout: 1500 }); } catch {}
-    }
+  for (let i = 0; i < 3; i++) { // ek ke baad doosra popup bhi aa sakta hai
+    const r = await closeOverlays(page);
+    if (!r) break;
+    console.log("cgpt: popup band:", r);
+    await page.waitForTimeout(400);
   }
 }
 // Cloudflare "Just a moment..." challenge: kuch der ruko (headed Chrome me aksar khud paas ho jata hai),
@@ -263,6 +285,7 @@ export class CgptClient {
       await this.fail(page, "limit", "chatgpt.com guest limit: " + t.slice(0, 160), "ratelimit");
     if (/clear current chat/i.test(t)) { // guest warning: sirf Escape. "Clear chat" / "Log in" kabhi mat dabao
       try { await page.keyboard.press("Escape"); } catch {}
+      await closeOverlays(page);
       if (!st.seen) st.seen = Date.now();
       if (Date.now() - st.seen > 8000)
         await this.fail(page, "clearchat", "chatgpt.com 'Clear current chat?' dialog band nahi hua | dialog: " + t.slice(0, 200), "ratelimit");
@@ -318,7 +341,8 @@ export class CgptClient {
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         await this.checkNet(net, page);
-        if (!started || tick++ % 6 === 0) await this.checkDialog(page, st);
+        if (!started || tick % 6 === 0) await this.checkDialog(page, st);
+        if (tick++ % 6 === 3) { const r = await closeOverlays(page); if (r) console.log("cgpt: popup band:", r); }
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
         const txt = n ? (await els.nth(n - 1).innerText().catch(() => "")).trim() : "";
