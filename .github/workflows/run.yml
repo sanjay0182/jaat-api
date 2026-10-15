@@ -18,12 +18,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # repo Variable (Settings -> Variables): DUCK_HEADED=1 ho to chrome xvfb me headed chalega
           DUCK_HEADED: ${{ vars.DUCK_HEADED }}
-          # optional: free providers ki key badalni ho to Secret banao (nahi to free-fallback.mjs wali default chalti hai)
+          # Private provider keys only GitHub Secrets se aayengi; source me koi live key nahi rakhi.
           REV_KEY: ${{ secrets.REV_KEY }}
           REV_GROK_KEY: ${{ secrets.REV_GROK_KEY }}
           REV_PRO_KEY: ${{ secrets.REV_PRO_KEY }}
           REV_LUNA_KEY: ${{ secrets.REV_LUNA_KEY }}
           DAI_KEY: ${{ secrets.DAI_KEY }}
+          GEM_KEY: ${{ secrets.GEM_KEY }}
+          GEM2_KEY: ${{ secrets.GEM2_KEY }}
+          # Secret values are deliberately not stored in source.
         run: |
           # peeche background me: sabse naye 10 chhodkar baaki poore ho chuke runs delete
           ( gh api "repos/${{ github.repository }}/actions/runs?status=completed&per_page=100" \
