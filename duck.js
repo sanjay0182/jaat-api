@@ -141,6 +141,10 @@ export function flatten(messages) {
   );
 }
 
+// transcript prompt par model kabhi "\n\nH: ..." likh ke agla Human turn khud bana deta hai: wahin kaat do
+const TURN_RE = /\n+[ \t]*(?:Human|H)[ \t]*:/;
+const cleanReply = (t) => { const m = TURN_RE.exec(t); return (m ? t.slice(0, m.index) : t).replace(/^\s*Assistant:\s*/, "").trim(); };
+
 function clamp(prompt, limit) {
   if (prompt.length <= limit) return prompt;
   const marker = "\n...[context truncated]...\n";
@@ -355,7 +359,17 @@ export class DuckClient {
     const left = () => Math.max(15000, timeoutMs - (Date.now() - t0));
     const canons = ms.map(canon);
     let emitted = 0; // client ko kitna text ja chuka (retry par double text na ho)
-    const od = onDelta ? (t) => { emitted += t.length; onDelta(t); } : undefined;
+    let guard = false, acc = "", sentLen = 0, cut = false; // guard: sirf poore transcript prompt par on
+    const od = onDelta ? (t) => {
+      if (!guard) { emitted += t.length; onDelta(t); return; }
+      if (cut) return;
+      acc += t;
+      const m = TURN_RE.exec(acc);
+      let upto = acc.length;
+      if (m) { cut = true; upto = m.index; }
+      else { const tail = /\n+[ \t]*(?:H(?:u(?:m(?:a(?:n)?)?)?)?)?[ \t]*$/.exec(acc); if (tail) upto = tail.index; } // adhura "\nH" ruko
+      if (upto > sentLen) { const piece = acc.slice(sentLen, upto); sentLen = upto; emitted += piece.length; onDelta(piece); }
+    } : undefined;
     try {
       let text = null, page = null;
       let session = key ? this.sessions.get(key) : null;
@@ -382,6 +396,7 @@ export class DuckClient {
       }
       if (text === null) {
         const hold = store ? {} : null; // #send isme page batata hai, race-free (shared variable nahi)
+        guard = flatten(ms).startsWith("Below is a conversation transcript");
         try {
           text = await this.#send(id, flatten(ms), left(), rwArg(), od, null, hold);
         } catch (e) {
@@ -392,6 +407,7 @@ export class DuckClient {
         }
         page = (hold && hold.page) || null;
       }
+      if (guard) text = cleanReply(text);
       const toolCalls = parseToolReply(text, tools, tool_choice);
       if (key && store && page && !page.isClosed()) {
         const sc = [...canons, canon(toolCalls ? { role: "assistant", content: null, tool_calls: toolCalls } : { role: "assistant", content: text })];
@@ -403,7 +419,7 @@ export class DuckClient {
         : legacy_fn ? { role: "assistant", content: null, function_call: toolCalls[0].function }
         : { role: "assistant", content: null, tool_calls: toolCalls };
       return JSON.stringify({
-        _jaat_sent: this.lastSent || null,
+        ...(process.env.DUCK_DEBUG_SENT === "1" ? { _jaat_sent: this.lastSent || null } : {}), // debug sirf opt-in (reply me prompt leak na ho)
         id: "chatcmpl-" + Math.random().toString(36).slice(2) + Date.now().toString(36),
         object: "chat.completion", created: Math.floor(Date.now() / 1000), model: String(model || DEFAULT_MODEL),
         choices: [{ index: 0, message: msg, finish_reason: toolCalls ? (legacy_fn ? "function_call" : "tool_calls") : "stop" }],

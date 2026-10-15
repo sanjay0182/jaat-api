@@ -541,7 +541,7 @@ async function handle(req, env) {
   }
 
   if (u.pathname === "/v1/models") {
-    const g = await gate(false);
+    const g = env.ADMIN_KEY && auth === env.ADMIN_KEY ? { ok: true } : await gate(false); // admin key se dashboard bhi list padh sakta hai
     if (!g.ok) return deny(g);
     const catalog = await hub.fetch("https://hub/models").then(r => r.json()).catch(() => ({ models: [] }));
     const liveModels = Array.isArray(catalog.models) ? catalog.models : [];

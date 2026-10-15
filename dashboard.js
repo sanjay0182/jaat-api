@@ -76,7 +76,7 @@ async function ed(i){var k=gk(i),a=prompt("Requests/minute limit (0=unlimited)",
 var d=prompt("Ab se kitne din chalegi? (0=hamesha, khali=badlo mat)","");var u={id:i,rpm:+a,rpd:+b};if(d)u.days=+d;await api("update",u);load()}
 async function guide(){
 var o=location.origin,ms=[];
-try{var r=await fetch("/v1/models");ms=(await r.json()).data||[]}catch(e){}
+try{var r=await fetch("/v1/models",{headers:{authorization:"Bearer "+T}});ms=(await r.json()).data||[]}catch(e){}
 var dk=[],fr=[];
 ms.forEach(function(m){if(m.owned_by=="duck.ai")dk.push(m.id+(m.free===false?" (paid)":""));else if(m.owned_by!="jaat")fr.push(m.id)});
 var J=function(x){return JSON.stringify(x)};
