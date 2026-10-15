@@ -77,8 +77,8 @@ var d=prompt("Ab se kitne din chalegi? (0=hamesha, khali=badlo mat)","");var u={
 async function guide(){
 var o=location.origin,ms=[];
 try{var r=await fetch("/v1/models",{headers:{authorization:"Bearer "+T}});ms=(await r.json()).data||[]}catch(e){}
-var dk=[],fr=[],pp=[],cg=[];
-ms.forEach(function(m){if(m.owned_by=="duck.ai")dk.push(m.id+(m.free===false?" (paid)":""));else if(m.owned_by=="perplexity.ai")pp.push(m.id);else if(m.owned_by=="chatgpt.com")cg.push(m.id);else if(m.owned_by!="jaat")fr.push(m.id)});
+var dk=[],fr=[],pp=[];
+ms.forEach(function(m){if(m.owned_by=="duck.ai")dk.push(m.id+(m.free===false?" (paid)":""));else if(m.owned_by=="perplexity.ai")pp.push(m.id);else if(m.owned_by!="jaat")fr.push(m.id)});
 var J=function(x){return JSON.stringify(x)};
 var tl=[{type:"function",function:{name:"get_weather",description:"Get weather of a city",parameters:{type:"object",properties:{city:{type:"string"}},required:["city"]}}}];
 var L=[
@@ -98,7 +98,6 @@ var L=[
 "  duck.ai models (best: tools + streaming + conversation_id): "+(dk.join(", ")||"gpt-5.4-mini, claude-haiku-4-5, claude-sonnet-4-6, ..."),
 "  aliases that map to duck.ai: claude-sonnet, claude-haiku, claude-opus, gpt-4o, gpt-4o-mini, gpt-5, duck-auto (any claude-* / gpt-* name also works)",
 "  perplexity.ai models (basic text chat only: no tools, no real streaming, no conversation_id): "+(pp.join(", ")||"pplx-auto")+"   (also: perplexity)",
-"  chatgpt.com models (guest mode, basic text chat only: no tools, no real streaming, no conversation_id; guest limit => 429): "+(cg.join(", ")||"chatgpt-guest")+"   (also: chatgpt)",
 "  free provider models (each name is one provider, tools pass through only if that provider supports them): "+(fr.join(", ")||"see GET /v1/models"),
 "",
 "1) CHAT (non-stream)  POST "+o+"/v1/chat/completions",
@@ -127,7 +126,7 @@ J({model:"gpt-4o",instructions:"You are helpful.",input:"Hello"}),
 "",
 "OPTIONAL FIELDS: reasoning_effort (low|medium|high), max_tokens, temperature.",
 "ERRORS: JSON  {\\"error\\":{\\"message\\":...,\\"type\\":...}}; 401 bad key, 429 rate/day limit of that key, 5xx upstream/duck.ai problem (just retry).",
-"NOTES: chatgpt.com models (chatgpt-*) are plain guest chat only - 429 means guest limit / login wall (retry after ~60s), 403 means bot check / IP block. perplexity.ai models (pplx-*) are plain chat only - tools / conversation_id are ignored and the full reply arrives at once; allow up to ~110s. A request can take 3-20s (real browser behind it). Use a timeout of at least 90s. Streaming is real only for duck.ai models without tools; otherwise chunks arrive at the end."
+"NOTES: perplexity.ai models (pplx-*) are plain chat only - tools / conversation_id are ignored and the full reply arrives at once; allow up to ~110s. A request can take 3-20s (real browser behind it). Use a timeout of at least 90s. Streaming is real only for duck.ai models without tools; otherwise chunks arrive at the end."
 ];
 $("gd").value=L.join("\\n")}
 function cp(){var t=$("gd");t.select();t.setSelectionRange(0,99999);try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand("copy")}}
