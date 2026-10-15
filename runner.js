@@ -133,7 +133,7 @@ async function handle({ id, provider, name, body, stream }) {
       data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort, conversation_id: j.conversation_id, tools: j.tools, tool_choice: j.tool_choice, legacy_fn: j.legacy_fn, onDelta: canStream ? sink.add : undefined }, DUCK_TIMEOUT_MS);
     } else if (provider === "duck-image") {
       const j = JSON.parse(body);
-      data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
+      data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS, j.size); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
     } else if (provider === "free") {
       const p = FREE_PROVIDERS.find((x) => x.name === name);
       if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");

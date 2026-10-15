@@ -16,7 +16,7 @@ function failed(out) {
 function errInfo(out) {
   let msg = "timeout", kind = "timeout";
   if (out) { try { const o = JSON.parse(out); msg = String(o.error || "error"); kind = o._jaat_kind || "error"; } catch { msg = "bad response"; kind = "error"; } }
-  return { msg: msg.replace(/[^\x20-\x7e]/g, " ").slice(0, 160), kind };
+  return { msg: msg.replace(/[^\x20-\x7e]/g, " ").slice(0, 600), kind };
 }
 
 const DUCK_MODELS = [
@@ -586,7 +586,7 @@ async function handle(req, env) {
     const g = await gate(true); if (!g.ok) return deny(g);
     const t0 = Date.now();
     // duck.ai image model (runner me real Chrome). Ek call = ek image (n ignore; duck ki daily limit bachane ke liye)
-    const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify({ provider: "duck-image", model: "image-generation", body: JSON.stringify({ prompt: prompt.slice(0, 4000) }) }) });
+    const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify({ provider: "duck-image", model: "image-generation", body: JSON.stringify({ prompt: prompt.slice(0, 4000), size: typeof a.size === "string" ? a.size.slice(0, 20) : "" }) }) });
     await hub.fetch("https://hub/record", { method: "POST", body: JSON.stringify({ id: g.id, model: "image-generation", provider: "duck-image", status: r.status, ms: Date.now() - t0 }) });
     if (r.status !== 200) return r; // reply() ka 502/504 JSON seedha (asli error message ke saath)
     let d; try { d = await r.json(); } catch { return Response.json({ error: { message: "bad image response from runner", type: "error" } }, { status: 502 }); }

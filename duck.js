@@ -190,6 +190,14 @@ export function findImage(raw) {
     const ev = parseLine(line);
     if (!ev) continue;
     if (typeof ev.message === "string") msg.push(ev.message); // base64 / data URL kai events me tuta ho sakta hai: message jodke dekho
+    // duckapi (hirotomasato) ke code se: image ui-component event me data.b64Image aati hai. status "partial" = kam-quality preview (skip),
+    // asli final frame status "success" wala hai. Partial ko kabhi final image nahi maante.
+    if (ev.data && typeof ev.data === "object" && typeof ev.data.b64Image === "string") {
+      if (ev.data.status === "partial") continue;
+      const b = ev.data.b64Image.replace(/^data:image\/[a-z+]+;base64,/i, "");
+      if (b.length > 2000) return { b64: b, mime: mimeOfB64(b) };
+      continue;
+    }
     walk(ev, "", 0);
     if (hit) return hit;
   }
@@ -672,15 +680,19 @@ export class DuckClient {
   //   (app me "GPT Image 2") chalata hai; result page me <img> banke aata hai, wahin se bytes uthate hain (protocol par nirbhar nahi).
   // Route B (fallback): body rewrite se model "image-generation" (purana, kam quality).
   // Return: JSON string {b64_json, mime} ya {url}. Image na mile to error (fake image kabhi nahi).
-  async image(prompt, timeoutMs = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000)) {
+  async image(prompt, timeoutMs = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000), size = "") {
     await this.ensure();
     await this.slot();
     const t0 = Date.now();
     const text = String(prompt || "").slice(0, 3800);
+    // size "WxH" -> composition hint (duckapi ka tareeka): tool seedha size nahi leta, prompt se orientation batate hain
+    let hint = "";
+    const dm = /^\s*(\d{2,5})\s*[x×]\s*(\d{2,5})\s*$/i.exec(String(size || ""));
+    if (dm) { const w = +dm[1], h = +dm[2]; hint = w > h ? " (composition: wide landscape)" : h > w ? " (composition: vertical portrait)" : " (composition: square)"; }
     try {
       let found = null, errA = "";
       try {
-        found = await this.#imageViaChat(++this.n, "Generate an image: " + text, Math.min(95000, timeoutMs));
+        found = await this.#imageViaChat(++this.n, "Call the image generation tool directly to create one image from the description below. Do not ask questions or explain the process. Image description: " + text + hint, Math.min(95000, timeoutMs));
       } catch (e) {
         errA = e.message;
         if (e.kind === "ban" || e.kind === "ratelimit") throw e;
@@ -690,7 +702,7 @@ export class DuckClient {
         try {
           found = await this.#imageViaModel(++this.n, text, Math.max(30000, timeoutMs - (Date.now() - t0)));
         } catch (e) {
-          throw new DuckError("chat-tool route: " + errA + " | model route: " + e.message, e.kind || "noimage");
+          throw new DuckError("chat-tool: " + errA.slice(0, 380) + " | model: " + e.message.slice(0, 120), e.kind || "noimage");
         }
       }
       if (found.url && !found.b64) {
@@ -715,7 +727,7 @@ export class DuckClient {
         found = await this.#domImage(page);
         if (!found) await page.waitForTimeout(1000);
       }
-      if (!found) { await this.#imgDiag(page, raw); throw new DuckError("image page me nahi aayi (model ne shayad sirf text diya)", "noimage"); }
+      if (!found) { const d = await this.#imgDiag(page, raw); throw new DuckError("image page me nahi aayi [" + d + "]", "noimage"); }
       return found;
     } finally { if (page) await page.close().catch(() => {}); }
   }
@@ -761,6 +773,7 @@ export class DuckClient {
 
   // image na mile to log me page ki halat (agli iteration me yahi dekhna hai)
   async #imgDiag(page, raw) {
+    let brief = "";
     try {
       const info = await page.evaluate(() => ({
         imgs: [...document.querySelectorAll("img")].map((i) => ({ src: (i.currentSrc || i.src || "").slice(0, 90), w: i.naturalWidth, h: i.naturalHeight })).slice(-8),
@@ -770,7 +783,10 @@ export class DuckClient {
       }));
       console.log("duck-image diag:", JSON.stringify(info), "| raw head:", String(raw || "").replace(/[A-Za-z0-9+\/=]{200,}/g, "<b64>").slice(0, 500));
       await this.debug(page, "image-none");
+      // chhota summary: error message me jata hai taaki imgtest.py me seedha dikhe (GitHub log na kholna pade)
+      brief = "imgs=" + info.imgs.map((i) => i.w + "x" + i.h + ":" + i.src.replace(/^https?:\/\//, "").slice(0, 40)).join(",") + " canvas=" + info.canvas + " btns=" + info.btns.slice(0, 10).join("/") + " text=" + info.text.replace(/\s+/g, " ").slice(-120);
     } catch {}
+    return brief;
   }
 
   async close() {
