@@ -23,7 +23,7 @@ const BASE = process.env.CGPT_BASE || "https://chatgpt.com";
 export const DEFAULT_MODEL = "chatgpt-guest";
 const MAX_PAGES = Number(process.env.CGPT_MAX_PAGES || 1); // guest ko ek waqt me ek hi conversation milti hai
 const MAX_PROMPT = Number(process.env.CGPT_MAX_PROMPT || 12000);
-const NOANS_MS = Number(process.env.CGPT_NOANS_MS || 35000); // message ke baad itne me jawab shuru na ho to jaldi fail (screenshot + status ke saath)
+const NOANS_MS = Number(process.env.CGPT_NOANS_MS || 45000); // message ke baad itne me jawab shuru na ho to jaldi fail (screenshot + status ke saath)
 const WARM_MAX_MS = Number(process.env.CGPT_WARM_MAX_MS || 120000); // garam page ki umar
 const PREWARM = process.env.CGPT_PREWARM === "1"; // default band: guest ko ek waqt me ek hi chat, doosra page "Clear current chat?" dikhata hai
 const FRESH = process.env.CGPT_FRESH !== "0"; // har request ka apna naya browser session (chats takrate nahi)
@@ -102,6 +102,11 @@ async function pageInfo(page) {
   const body = (await page.innerText("body").catch(() => "")).replace(/\s+/g, " ").slice(0, 220);
   const n = await page.evaluate(() => ({ ce: document.querySelectorAll('[contenteditable]').length, ta: document.querySelectorAll('textarea').length, inp: document.querySelectorAll('input').length })).catch(() => ({}));
   return `url=${page.url()} | title=${title} | ce=${n.ce} ta=${n.ta} input=${n.inp} | body: ${body}`;
+}
+
+// textbox ka text: textarea ho to .value, contenteditable ho to innerText (textarea ka innerText khali aata hai)
+async function boxText(box) {
+  try { return String(await box.evaluate((el) => (typeof el.value === "string" ? el.value : el.innerText || ""))).trim(); } catch { return ""; }
 }
 
 class CgptError extends Error {
@@ -285,14 +290,13 @@ export class CgptClient {
   async clearChatDialog(page, force = false) {
     try {
       if (!force && (await page.locator(SEL.user).count().catch(() => 0))) return false; // hamara message ja chuka, kuch mat dabao (force sirf recovery me)
-      const d = page.locator(SEL.dialog).first();
+      const d = page.locator(SEL.dialog).filter({ hasText: /clear current chat/i }).first(); // 4 dialog hain, sahi wala chuno
       if (!(await d.count())) return false;
-      const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ");
-      if (!/clear current chat/i.test(t)) return false;
-      const btn = d.locator("button, a, [role=button]").filter({ hasText: /^\s*clear chat\s*$/i }).first();
+      let btn = d.locator("button, a, [role=button]").filter({ hasText: /^\s*clear chat\s*$/i }).first();
+      if (!(await btn.count())) btn = page.getByRole("button", { name: /^clear chat$/i }).first();
       if (!(await btn.count())) return false;
       await btn.click({ timeout: 3000 });
-      console.log("cgpt: 'Clear chat' dabaya (message bhejne se pehle)");
+      console.log("cgpt: 'Clear chat' dabaya");
       await page.waitForTimeout(900);
       return true;
     } catch (e) { return false; }
@@ -392,7 +396,7 @@ export class CgptClient {
       // message bhejo. Dialog beech me aa jaye to Clear chat dabake dobara bhejo (max 3 koshish)
       const sendOnce = async () => {
         await box.click();
-        const cur = (await box.innerText().catch(() => "")).trim();
+        const cur = await boxText(box);
         // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa). Box me pehle se text ho to dobara mat daalo
         if (!cur) await page.keyboard.insertText(prompt);
         await page.waitForTimeout(400);
@@ -405,10 +409,11 @@ export class CgptClient {
       for (let attempt = 1; attempt <= 3; attempt++) {
         await sendOnce();
         if (await this.clearChatDialog(page)) { console.log("cgpt: dialog aaya tha, dobara bhej raha hoon (koshish " + attempt + ")"); continue; }
-        if ((await page.locator(SEL.user).count().catch(() => 0)) || net.status) break; // message chala gaya
+        const sent = async () => (await page.locator(SEL.user).count().catch(() => 0)) > 0 || !!net.status || (await boxText(box)) === "";
+        if (await sent()) break; // message chala gaya (bubble dikha / network gaya / box khali)
         try { await page.locator(SEL.send).first().click({ timeout: 3000 }); } catch {} // Enter se nahi gaya to send button
         await page.waitForTimeout(1200);
-        if ((await page.locator(SEL.user).count().catch(() => 0)) || net.status) break;
+        if (await sent()) break;
       }
 
       // jawab aane tak ruko: DOM me text thehar jaye
@@ -432,9 +437,9 @@ export class CgptClient {
         }
         if (!started || tick % 6 === 0) await this.checkDialog(page, st);
         // recovery: "Clear current chat?" 5s se khula hai aur jawab shuru nahi hua -> Clear chat dabao, message dobara bhejo (max 2 baar)
-        if (!started && st.open && st.dlgAt && /clear current chat/i.test(st.dlgText) && Date.now() - st.dlgAt > 5000 && st.recov < 2) {
+        if (!started && st.open && st.dlgAt && /clear current chat/i.test(st.dlgText) && Date.now() - st.dlgAt > 3000 && st.recov < 3) {
           st.recov++; st.dlgAt = 0;
-          console.log("cgpt: dialog 5s se atka hai, Clear chat dabake dobara bhej raha hoon (recovery " + st.recov + ")");
+          console.log("cgpt: dialog 3s se atka hai, Clear chat dabake dobara bhej raha hoon (recovery " + st.recov + ")");
           if (await this.clearChatDialog(page, true)) { st.open = false; await sendOnce(); }
         }
         tick++;
