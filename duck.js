@@ -255,11 +255,18 @@ function withToolInstruction(messages, tools, toolChoice) {
   const rule = fn ? `You MUST call the tool "${fn}" now.`
     : toolChoice === "required" || toolChoice === "any" ? "You MUST call at least one of the tools now."
     : "If a listed tool is needed, call it; otherwise answer normally.";
-  const instruction = `\n\nTOOL CALLING RULE: ${rule} To call a tool output ONLY <tool_call>{"name":"tool_name","arguments":{}}</tool_call> (one block per call; several blocks for parallel calls) and no other text. Arguments must be a JSON object matching the tool parameters. Never invent tool names. Tool outputs come back as "Tool result" messages. Available tools: ${JSON.stringify(schemas)}`;
+  const ex = fn ? schemas.find((t) => t.name === fn) || schemas[0] : schemas[0];
+  const req = (ex.parameters && ex.parameters.required) || [];
+  const exArgs = {}; for (const k of req) exArgs[k] = "<" + k + ">";
+  const instruction = `\n\nTOOL CALLING RULE: You are connected to external tools that the system runs for you, so you CAN use them. ${rule} To call a tool output ONLY <tool_call>{"name":"tool_name","arguments":{}}</tool_call> (one block per call; several blocks for parallel calls) and no other text, no apology, no explanation. Example: <tool_call>{"name":"${ex.name}","arguments":${JSON.stringify(exArgs)}}</tool_call> Arguments must be a JSON object matching the tool parameters. Never invent tool names. Tool outputs come back as "Tool result" messages. Available tools: ${JSON.stringify(schemas)}`;
   const out = (messages || []).map((m) => ({ ...m }));
   const i = out.findIndex((m) => m.role === "system");
   if (i >= 0) out[i].content = textOf(out[i].content) + instruction;
   else out.unshift({ role: "system", content: instruction });
+  // model aakhri message ko zyada dhyan se padhta hai: wahan chhota reminder bhi
+  const last = out[out.length - 1];
+  if (last && last.role !== "system" && last.role !== "assistant")
+    last.content = textOf(last.content) + `\n\n[${rule} Tool call format: <tool_call>{"name":"...","arguments":{...}}</tool_call> only.]`;
   return out;
 }
 
@@ -408,7 +415,19 @@ export class DuckClient {
         page = (hold && hold.page) || null;
       }
       if (guard) text = cleanReply(text);
-      const toolCalls = parseToolReply(text, tools, tool_choice);
+      let toolCalls = parseToolReply(text, tools, tool_choice);
+      const must = tool_choice === "required" || tool_choice === "any" || !!forcedName(tool_choice);
+      if (!toolCalls && must && toolSchemas(tools).length) {
+        // tool_choice required/forced tha par model ne text diya: ek baar sakht reminder ke saath fresh page par dobara
+        console.log("duck: tool_call nahi aaya (required), ek retry");
+        const m2 = [...ms, { role: "assistant", content: text }, { role: "user", content: "That was not a tool call. Reply with ONLY the <tool_call>{\"name\":...,\"arguments\":{...}}</tool_call> block now. No other text." }];
+        if (page) { if (key && this.sessions.get(key) && this.sessions.get(key).page === page) this.sessions.delete(key); await page.close().catch(() => {}); page = null; } // session ki history ab mel nahi khati
+        try {
+          const t2 = await this.#send(id, flatten(m2), left(), rwArg(), null, null, null);
+          const c2 = parseToolReply(t2, tools, tool_choice);
+          if (c2) { toolCalls = c2; text = t2; }
+        } catch (e) { console.log("duck: tool retry fail:", e.message); }
+      }
       if (key && store && page && !page.isClosed()) {
         const sc = [...canons, canon(toolCalls ? { role: "assistant", content: null, tool_calls: toolCalls } : { role: "assistant", content: text })];
         if (session && page === session.page && this.sessions.get(key) === session) { session.canon = sc; session.lastUsed = Date.now(); }
