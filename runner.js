@@ -23,6 +23,16 @@ const DUCK_TIMEOUT_MS = Number(process.env.DUCK_TIMEOUT_MS || 80000);
 
 const start = Date.now();
 duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
+// duck.ai ka asli model catalog (page ke network response se) worker ko bhejo. Na mile to hardcoded fallback chalta hai.
+// Runner har ~3 min rotate hota hai, isliye har run me ek baar (start ke baad) publish; lamba run ho to 10 min me dobara.
+async function publishDuckModels() {
+  try {
+    const models = await duck.discoverModels();
+    if (models.length) await fetch(W + "/models", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ models }) });
+  } catch (e) { console.log("duck model catalog update skipped:", e.message); }
+}
+publishDuckModels();
+const modelRefresh = setInterval(publishDuckModels, 10 * 60e3); modelRefresh.unref?.();
 let dispatched = false;
 let inflight = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -117,7 +127,11 @@ async function handle({ id, provider, name, body, stream }) {
   try {
     if (provider === "duck") {
       const j = JSON.parse(body);
-      data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort, onDelta: sink ? sink.add : undefined }, DUCK_TIMEOUT_MS);
+      // tools ke saath jawab tool_call ho sakta hai, isliye real stream sirf tab jab tools na ho (ya tool_choice none)
+      const canStream = sink && (!j.tools?.length || j.tool_choice === "none");
+      data = await duck.chat({ model: j.model, messages: j.messages, reasoning_effort: j.reasoning_effort, conversation_id: j.conversation_id, tools: j.tools, tool_choice: j.tool_choice, legacy_fn: j.legacy_fn, onDelta: canStream ? sink.add : undefined }, DUCK_TIMEOUT_MS);
+    } else if (provider === "duck-image") {
+      throw new Error("duck.ai native image tool ka page protocol abhi detect/verify nahi hua; image fake nahi banayi gayi");
     } else if (provider === "free") {
       const p = FREE_PROVIDERS.find((x) => x.name === name);
       if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
@@ -160,5 +174,6 @@ while (true) {
 
 // chal rahi requests poori hone do, phir band
 while (inflight > 0) await sleep(200);
+clearInterval(modelRefresh);
 await duck.close();
 process.exit(0);

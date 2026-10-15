@@ -21,31 +21,79 @@ const WARM_MIN_MS = Number(process.env.DUCK_WARM_MIN_MS || 2000);
 const WARM_POOL = Number(process.env.DUCK_WARM_POOL || 3); // kitne page pehle se garam rakhne hain
 const WARM_MAX_MS = Number(process.env.DUCK_WARM_MAX_MS || 8000);
 const MAX_PAGES = Math.max(Number(process.env.DUCK_MAX_PAGES || 3), WARM_POOL); // MAX_PAGES kabhi pool se chhota nahi
+const PAGE_CAP = MAX_PAGES + WARM_POOL; // chrome ke kul pages: MAX_PAGES (sessions/active) + WARM_POOL (garam spare). Runner memory ke liye upar nahi
+const SESSION_TTL = Number(process.env.DUCK_SESSION_TTL_MS || 600000); // idle session ~10 min
 const STALE_MS = 150000; // itne se purana warm page band karke naya banate hain
 const SWEEP_MS = 30000;  // har 30s warm pages ki safai
 const PROMPT_FALLBACK_LIMIT = 12000; // textarea me maxlength na mile to
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
 // ---- model names ---------------------------------------------------------
-const LIVE = [
+// FALLBACK = hardcoded list. Asli catalog duck.ai page ke network response se pakda jata hai (setLiveModels -> LIVE_CAT)
+const FALLBACK = [
   "gpt-5.6-luna", "gpt-5.4-mini", "claude-haiku-4-5", "mistral-small-2603",
   "tinfoil/gpt-oss-120b", "tinfoil/gemma4-31b",
   "gpt-5.6-terra", "gpt-5.6-sol", "claude-sonnet-4-6", "claude-opus-4-8", // paid ho sakte hain
 ];
+let LIVE_CAT = []; // [{id, name?, free?}]
 const ALIAS = {
   "duck-auto": DEFAULT_MODEL, "duck": DEFAULT_MODEL, "duck-default": DEFAULT_MODEL,
   "gpt-5.6": "gpt-5.6-luna", "gpt-5.4": "gpt-5.4-mini", "gpt-5": "gpt-5.4-mini",
-  "gpt-4o": "gpt-5.4-mini", "gpt-4o-mini": "gpt-5.4-mini",
+  "gpt-4o": "gpt-5.4-mini", "gpt-4o-mini": "gpt-5.4-mini", "o3-mini": "gpt-5.4-mini",
   "claude-haiku": "claude-haiku-4-5", "claude-sonnet": "claude-sonnet-4-6",
   "claude-opus": "claude-opus-4-8", "mistral-small": "mistral-small-2603",
   "gpt-oss-120b": "tinfoil/gpt-oss-120b", "gemma4-31b": "tinfoil/gemma4-31b",
 };
+export function getLiveModels() { return LIVE_CAT.length ? LIVE_CAT.map((x) => ({ ...x })) : FALLBACK.map((id) => ({ id })); }
+export function setLiveModels(models) {
+  const out = [], seen = new Set();
+  for (const x of Array.isArray(models) ? models : []) {
+    const o = typeof x === "string" ? { id: x } : x && typeof x.id === "string" ? x : null;
+    if (!o || o.id.length > 120 || seen.has(o.id)) continue;
+    seen.add(o.id); out.push(o);
+  }
+  if (out.length) LIVE_CAT = out;
+}
+
 export function resolveModel(name) {
-  const n = String(name || "").trim().toLowerCase();
+  const raw = String(name || "").trim(), n = raw.toLowerCase();
   if (!n) return DEFAULT_MODEL;
-  if (ALIAS[n]) return ALIAS[n];
-  const hit = LIVE.find((m) => m.toLowerCase() === n);
-  return hit || String(name).trim();
+  const ids = LIVE_CAT.length ? LIVE_CAT.map((x) => x.id) : FALLBACK; // live list ho to wahi, warna hardcoded
+  const exact = ids.find((m) => m.toLowerCase() === n);
+  if (exact) return exact;
+  if (ALIAS[n]) {
+    if (!LIVE_CAT.length || ids.includes(ALIAS[n])) return ALIAS[n];
+    const near = ids.find((m) => m.toLowerCase().startsWith(n)); // alias ka target live catalog se hat gaya: nazdeeki live model
+    return near || ALIAS[n];
+  }
+  // purane / lambe naam (claude-3-5-sonnet-2024..., gpt-4-turbo) -> nazdeeki duck model
+  if (/^claude-.*haiku/.test(n)) return "claude-haiku-4-5";
+  if (/^claude-.*sonnet/.test(n)) return "claude-sonnet-4-6";
+  if (/^claude-.*opus/.test(n)) return "claude-opus-4-8";
+  if (/^(gpt-4|gpt-3|o\d)/.test(n)) return "gpt-5.4-mini";
+  return ids.find((m) => m.toLowerCase().startsWith(n)) || raw;
+}
+
+// duck.ai ke models response (shape badalta rehta hai) se id/name/free nikalo - tolerant parser
+function normModel(x) {
+  const o = { id: x.id };
+  const name = x.name || x.displayName || x.label || x.title;
+  if (typeof name === "string") o.name = name.slice(0, 80);
+  const free = typeof x.free === "boolean" ? x.free : typeof x.isFree === "boolean" ? x.isFree
+    : typeof x.paid === "boolean" ? !x.paid : typeof x.isPaid === "boolean" ? !x.isPaid
+    : typeof x.tier === "string" ? /free/i.test(x.tier) : typeof x.access === "string" ? /free/i.test(x.access) : undefined;
+  if (free !== undefined) o.free = free;
+  return o;
+}
+function extractModels(json, depth = 0) {
+  if (depth > 5 || !json || typeof json !== "object") return [];
+  if (Array.isArray(json)) {
+    const items = json.map((x) => typeof x === "string" ? { id: x } : x && typeof x === "object" ? { ...x, id: x.id || x.model || x.modelId || x.slug } : null);
+    const ok = items.filter((x) => x && typeof x.id === "string" && /^[\w.\-\/:@]{2,120}$/.test(x.id));
+    if (ok.length >= 2 && ok.length >= items.length / 2) return ok.map(normModel);
+  }
+  for (const v of Object.values(json)) { const r = extractModels(v, depth + 1); if (r.length) return r; }
+  return [];
 }
 
 // ---- messages -> ek prompt string ------------------------------------------
@@ -57,22 +105,37 @@ function textOf(content) {
   return String(content);
 }
 
+// assistant ke tool call ko wahi <tool_call> format me likho jo model ko bola gaya hai (model galat format copy na kare)
+function callText(c) {
+  const f = (c && c.function) || c || {};
+  let a = f.arguments ?? {};
+  if (typeof a === "string") { try { a = JSON.parse(a); } catch {} }
+  return `<tool_call>${JSON.stringify({ name: f.name, arguments: a })}</tool_call>`;
+}
+function msgText(m) {
+  let t = textOf(m.content);
+  const calls = Array.isArray(m.tool_calls) && m.tool_calls.length ? m.tool_calls : m.function_call ? [m.function_call] : [];
+  if (m.role === "assistant" && calls.length) t += (t ? "\n" : "") + calls.map(callText).join("\n");
+  return t;
+}
+// session reuse ke liye har message ki canonical string (tool_calls wale assistant message bhi match karte hain)
+const canon = (m) => `${m.role}|${m.tool_call_id || m.name || ""}|${msgText(m).trim()}`;
+
 export function flatten(messages) {
   const ms = (messages || []).filter(Boolean);
   const parts = [];
   for (const m of ms) {
-    let t = textOf(m.content);
-    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length)
-      t += (t ? "\n" : "") + m.tool_calls.map((c) => `[tool_call ${c.function?.name}(${c.function?.arguments || ""})]`).join("\n");
+    const t = msgText(m);
     if (!t.trim()) continue;
-    const role = m.role === "tool" ? `Tool result${m.tool_call_id ? " " + m.tool_call_id : ""}`
+    const isTool = m.role === "tool" || m.role === "function";
+    const role = isTool ? `Tool result${m.tool_call_id || m.name ? " " + (m.tool_call_id || m.name) : ""}`
       : m.role === "assistant" ? "Assistant"
       : m.role === "system" || m.role === "developer" ? "System" : "Human";
     parts.push({ role, t: t.trim() });
   }
   if (parts.length === 1 && parts[0].role === "Human") return parts[0].t; // simple sawaal: as-is
   return (
-    "Below is a conversation transcript. Reply ONLY as the Assistant to the last Human message. " +
+    "Below is a conversation transcript. Reply ONLY as the Assistant to the last Human message (or to the last Tool result). " +
     "Do not repeat the transcript or write role labels.\n\n" +
     parts.map((p) => `${p.role}: ${p.t}`).join("\n\n")
   );
@@ -177,6 +240,50 @@ function chromePath() {
   return undefined;
 }
 
+// Duck ke paas native function-call API nahi; schema ko prompt me strict format me bhejte hain.
+const toolSchemas = (tools) => (Array.isArray(tools) ? tools : []).map((t) => (t && t.type === "function" && t.function ? t.function : t)).filter((t) => t && typeof t.name === "string");
+const forcedName = (tc) => (tc && typeof tc === "object" ? tc.function?.name || tc.name || null : null);
+
+function withToolInstruction(messages, tools, toolChoice) {
+  const schemas = toolSchemas(tools);
+  if (!schemas.length || toolChoice === "none") return messages || []; // tool_choice none: kuch alag nahi
+  const fn = forcedName(toolChoice);
+  const rule = fn ? `You MUST call the tool "${fn}" now.`
+    : toolChoice === "required" || toolChoice === "any" ? "You MUST call at least one of the tools now."
+    : "If a listed tool is needed, call it; otherwise answer normally.";
+  const instruction = `\n\nTOOL CALLING RULE: ${rule} To call a tool output ONLY <tool_call>{"name":"tool_name","arguments":{}}</tool_call> (one block per call; several blocks for parallel calls) and no other text. Arguments must be a JSON object matching the tool parameters. Never invent tool names. Tool outputs come back as "Tool result" messages. Available tools: ${JSON.stringify(schemas)}`;
+  const out = (messages || []).map((m) => ({ ...m }));
+  const i = out.findIndex((m) => m.role === "system");
+  if (i >= 0) out[i].content = textOf(out[i].content) + instruction;
+  else out.unshift({ role: "system", content: instruction });
+  return out;
+}
+
+function parseToolReply(text, tools, toolChoice) {
+  const schemas = toolSchemas(tools);
+  if (!schemas.length || toolChoice === "none") return null;
+  const allowed = new Set(schemas.map((t) => t.name));
+  const cands = [];
+  const re = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+  let m;
+  while ((m = re.exec(text))) cands.push(m[1]);
+  if (!cands.length) { const f = /```(?:json)?\s*([\s\S]*?)```/i.exec(text); cands.push(f ? f[1] : text.trim()); } // fenced / bare JSON fallback
+  const calls = [];
+  for (const c of cands) {
+    let obj; try { obj = JSON.parse(c.trim()); } catch { continue; }
+    const list = Array.isArray(obj) ? obj : Array.isArray(obj && obj.tool_calls) ? obj.tool_calls : [obj];
+    for (let o of list) {
+      if (o && o.function && typeof o.function === "object") o = o.function;
+      if (!o || typeof o.name !== "string" || !allowed.has(o.name)) continue; // naam provided tools me hona chahiye
+      let args = o.arguments ?? o.parameters ?? o.input ?? {};
+      if (typeof args === "string") { try { args = JSON.parse(args); } catch { continue; } }
+      if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+      calls.push({ id: "call_" + Math.random().toString(36).slice(2, 12), type: "function", function: { name: o.name, arguments: JSON.stringify(args) } });
+    }
+  }
+  return calls.length ? calls : null;
+}
+
 // ---- client ------------------------------------------------------------------
 export class DuckClient {
   constructor() {
@@ -186,6 +293,8 @@ export class DuckClient {
     this.n = 0;
     this.ready = []; this.refilling = 0; // pehle se garam (warm) pages
     this.sweeper = null;
+    this.sessions = new Map(); // conversation_id -> {page, model, canon[], lastUsed, busy}; runner rotation par naturally reset
+    this.catalog = []; this.catalogAt = 0; // duck.ai se pakda hua models catalog
   }
 
   async ensure() {
@@ -228,45 +337,97 @@ export class DuckClient {
 
   // messages (OpenAI style) -> OpenAI chat.completion JSON string
   // onDelta(text) optional: SSE ka har naya tukda aate hi turant call hota hai (real streaming ke liye)
-  async chat({ model, messages, reasoning_effort, onDelta }, timeoutMs = 80000) {
+  async chat({ model, messages, reasoning_effort, onDelta, conversation_id, tools, tool_choice, legacy_fn }, timeoutMs = 80000) {
     await this.ensure();
     await this.slot();
     const id = ++this.n;
     const t0 = Date.now();
+    const ms = withToolInstruction((messages || []).filter(Boolean), tools, tool_choice);
+    const key = typeof conversation_id === "string" ? conversation_id.slice(0, 200) : "";
+    const wantModel = resolveModel(model);
+    const rw = {};
+    if (wantModel !== DEFAULT_MODEL) rw.model = wantModel;
+    if (reasoning_effort) {
+      const e = String(reasoning_effort).toLowerCase();
+      rw.reasoningEffort = { fast: "none", off: "none", false: "none" }[e] || e;
+    }
+    const rwArg = () => (this.rewriteOk && Object.keys(rw).length ? rw : null);
+    const left = () => Math.max(15000, timeoutMs - (Date.now() - t0));
+    const canons = ms.map(canon);
+    let emitted = 0; // client ko kitna text ja chuka (retry par double text na ho)
+    const od = onDelta ? (t) => { emitted += t.length; onDelta(t); } : undefined;
     try {
-      const wantModel = resolveModel(model);
-      let text;
-      try {
-        const rw = {};
-        if (wantModel !== DEFAULT_MODEL) rw.model = wantModel;
-        if (reasoning_effort) { // duck.ai body field: reasoningEffort (page default = "none")
-          const e = String(reasoning_effort).toLowerCase();
-          rw.reasoningEffort = { fast: "none", off: "none", false: "none" }[e] || e;
-        }
-        text = await this.#send(id, flatten(messages), timeoutMs, this.rewriteOk && Object.keys(rw).length ? rw : null, onDelta);
-      } catch (e) {
-        if (e.kind === "rewrite") { // body badalne par challenge fail -> bina badle default model se
+      let text = null, page = null;
+      let session = key ? this.sessions.get(key) : null;
+      let store = !!key;
+      if (session && session.busy) { session = null; store = false; } // isi conversation par doosri request chal rahi: ye fresh page par, session store nahi
+      if (session) {
+        const n = session.canon.length, delta = ms.slice(n);
+        const fine = session.model === wantModel && !session.page.isClosed() && Date.now() - session.lastUsed < SESSION_TTL
+          && delta.length > 0 && canons.slice(0, n).every((c, i) => c === session.canon[i])
+          && delta.every((m) => m.role === "user" || m.role === "tool" || m.role === "function");
+        if (fine) {
+          session.busy = true;
+          try {
+            // sirf naye turn(s) usi khuli page me type karo (new chat nahi)
+            text = await this.#send(id, flatten(delta), timeoutMs, rwArg(), od, session.page, null);
+            page = session.page;
+          } catch (e) {
+            this.sessions.delete(key); await session.page.close().catch(() => {});
+            // text pehle hi client ko ja chuka ho (ya ban/ratelimit) to retry nahi, warna double text ho jata
+            if (emitted > 0 || e.kind === "ban" || e.kind === "ratelimit") throw e;
+            console.log("duck: session reuse fail (" + e.message + ") -> fresh page par poora prompt");
+          } finally { session.busy = false; }
+        } else { this.sessions.delete(key); await session.page.close().catch(() => {}); }
+      }
+      if (text === null) {
+        const hold = store ? {} : null; // #send isme page batata hai, race-free (shared variable nahi)
+        try {
+          text = await this.#send(id, flatten(ms), left(), rwArg(), od, null, hold);
+        } catch (e) {
+          if (e.kind !== "rewrite" || emitted > 0) throw e;
           this.rewriteOk = false;
           console.log("duck: model rewrite reject hua, default model use ho raha hai");
-          text = await this.#send(id, flatten(messages), Math.max(15000, timeoutMs - (Date.now() - t0)), null, onDelta);
-        } else throw e;
+          text = await this.#send(id, flatten(ms), left(), null, od, null, hold);
+        }
+        page = (hold && hold.page) || null;
+      }
+      const toolCalls = parseToolReply(text, tools, tool_choice);
+      if (key && store && page && !page.isClosed()) {
+        const sc = [...canons, canon(toolCalls ? { role: "assistant", content: null, tool_calls: toolCalls } : { role: "assistant", content: text })];
+        if (session && page === session.page && this.sessions.get(key) === session) { session.canon = sc; session.lastUsed = Date.now(); }
+        else await this.#storeSession(key, wantModel, page, sc);
       }
       const plen = JSON.stringify(messages || "").length;
+      const msg = !toolCalls ? { role: "assistant", content: text }
+        : legacy_fn ? { role: "assistant", content: null, function_call: toolCalls[0].function }
+        : { role: "assistant", content: null, tool_calls: toolCalls };
       return JSON.stringify({
         _jaat_sent: this.lastSent || null,
         id: "chatcmpl-" + Math.random().toString(36).slice(2) + Date.now().toString(36),
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: String(model || DEFAULT_MODEL),
-        choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+        object: "chat.completion", created: Math.floor(Date.now() / 1000), model: String(model || DEFAULT_MODEL),
+        choices: [{ index: 0, message: msg, finish_reason: toolCalls ? (legacy_fn ? "function_call" : "tool_calls") : "stop" }],
         usage: { prompt_tokens: Math.ceil(plen / 4), completion_tokens: Math.ceil(text.length / 4), total_tokens: Math.ceil((plen + text.length) / 4) },
       });
     } finally { this.free(); }
   }
 
+  async #storeSession(key, model, page, canonList) {
+    const old = this.sessions.get(key);
+    if (old && old.page !== page) await old.page.close().catch(() => {});
+    this.sessions.set(key, { page, model, canon: canonList.slice(), lastUsed: Date.now(), busy: false });
+    // bounded LRU: sessions MAX_PAGES se upar nahi (sabse purani idle session band)
+    while (this.sessions.size > MAX_PAGES) {
+      const idle = [...this.sessions.entries()].filter(([, v]) => !v.busy && v.page !== page).sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+      if (!idle) break;
+      this.sessions.delete(idle[0]); await idle[1].page.close().catch(() => {});
+    }
+  }
+
   // ---- pre-warm: duck.ai page pehle se khol ke rakho, request aate hi use ho ----
   async #prepare() {
     const page = await this.ctx.newPage();
+    page.on("response", (r) => { this.#sniff(r); }); // models catalog yahin se pakdo (extra page nahi khulta)
     try {
       await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 45000 });
       const t0 = Date.now();
@@ -279,10 +440,22 @@ export class DuckClient {
     } catch (e) { await page.close().catch(() => {}); throw e; }
   }
 
+  // duck.ai page ka "models" JSON response pakdo -> catalog (+ resolveModel ke liye setLiveModels)
+  async #sniff(r) {
+    try {
+      const u = r.url();
+      if (!/models/i.test(u) || !/duck\.ai|duckduckgo\.com/i.test(u)) return;
+      if (process.env.DUCK_LOG_MODELS === "1") console.log("duck: models-type response", r.status(), u.split("?")[0]);
+      if (r.status() !== 200 || !/json/i.test(r.headers()["content-type"] || "")) return;
+      const found = extractModels(await r.json());
+      if (found.length) { this.catalog = found; this.catalogAt = Date.now(); setLiveModels(found); }
+    } catch {}
+  }
+
   #refill() {
     if (!this.ctx) return;
-    // pool poora rakho, lekin chrome ke kul pages MAX_PAGES + WARM_POOL se upar nahi (runner ki memory bachane ke liye)
-    while (this.ready.length + this.refilling < WARM_POOL && this.ctx.pages().length + this.refilling < MAX_PAGES + WARM_POOL) {
+    // pool poora rakho; chrome ke kul pages PAGE_CAP (= MAX_PAGES + WARM_POOL) se upar nahi
+    while (this.ready.length + this.refilling < WARM_POOL && this.ctx.pages().length + this.refilling < PAGE_CAP) {
       const delay = this.refilling * 400; // ek saath 3 page khulne se CPU na atke, thoda gap
       this.refilling++;
       setTimeout(() => {
@@ -293,10 +466,13 @@ export class DuckClient {
     }
   }
 
-  // stale (>150s) warm pages band karo, phir pool dobara bharo
+  // stale (>150s) warm pages + idle (>TTL) sessions band karo, phir pool dobara bharo
   async #sweep() {
     if (!this.ctx) return;
     const now = Date.now();
+    for (const [key, ss] of this.sessions) {
+      if (!ss.busy && (now - ss.lastUsed >= SESSION_TTL || ss.page.isClosed())) { this.sessions.delete(key); await ss.page.close().catch(() => {}); }
+    }
     const bad = (p) => now - p.at >= STALE_MS || p.page.isClosed();
     const old = this.ready.filter(bad);          // sync partition: beech me #takePage se race nahi
     this.ready = this.ready.filter((p) => !bad(p));
@@ -311,16 +487,34 @@ export class DuckClient {
       if (Date.now() - p.at < STALE_MS && !p.page.isClosed()) { this.#refill(); return p.page; }
       await p.page.close().catch(() => {});
     }
+    // warm page nahi aur total pages cap par: sabse purani idle session hatao
+    if (this.ctx.pages().length >= PAGE_CAP) {
+      const idle = [...this.sessions.entries()].filter(([, v]) => !v.busy).sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+      if (idle) { this.sessions.delete(idle[0]); await idle[1].page.close().catch(() => {}); }
+    }
+    const p = await this.#prepare();
     this.#refill();
-    return (await this.#prepare()).page;
+    return p.page;
   }
 
-  // runner start hote hi chrome + ek page tayyar rakho (pehli duck request fast ho)
+  // runner start hote hi chrome + warm pool tayyar rakho (pehli duck request fast ho)
   async warmup() {
     try { await this.ensure(); this.#refill(); } catch (e) { console.log("duck warmup fail:", e.message); }
   }
 
-  async #send(id, prompt, timeoutMs, rewrite, onDelta) {
+  // Warm pages ke network response se pakda catalog (max waitMs ruk ke). Na mile to [] -> hardcoded fallback chalta rahega.
+  // Debug: DUCK_LOG_MODELS=1 se "models" wale saare duck.ai URLs log hote hain.
+  async discoverModels(waitMs = 12000) {
+    try {
+      await this.ensure(); this.#refill();
+      const t0 = Date.now();
+      while (!this.catalog.length && Date.now() - t0 < waitMs) await new Promise((r) => setTimeout(r, 300));
+      if (!this.catalog.length) console.log("duck: models catalog intercept nahi hua (DUCK_LOG_MODELS=1 DUCK_HEADED=1 se check karo), fallback list chalegi");
+      return this.catalog.slice();
+    } catch (e) { console.log("duck model discovery skipped:", e.message); return []; }
+  }
+
+  async #send(id, prompt, timeoutMs, rewrite, onDelta, reusePage = null, hold = null) {
     const deadline = Date.now() + timeoutMs;
     let started = false; // pehla delta bhejne se pehle shuruaati whitespace hata do (final out.trim() jaisa)
     const emit = (t) => {
@@ -328,7 +522,9 @@ export class DuckClient {
       if (!started) { t = t.replace(/^\s+/, ""); if (!t) return; started = true; }
       try { onDelta(t); } catch {} // callback ka error duck ko na roke
     };
-    const page = await this.#takePage();
+    const page = reusePage || await this.#takePage();
+    if (hold) hold.page = page; // session store ke liye page chat() ko batao
+    let ok = false;
     try {
       const ta = await page.$("textarea");
       if (!ta) { await this.debug(page, `r${id}-no-textarea`); throw new DuckError("duck.ai textarea nahi mila (page badal gaya ya block page)", "layout"); }
@@ -371,6 +567,7 @@ export class DuckClient {
           const ev = parseLine(buf); if (ev && ev.message) { out += ev.message; emit(ev.message); }
           if (!saw) { await this.debug(page, `r${id}-empty`); throw new DuckError("duck.ai ne bina jawab ke stream band kar di"); }
           if (!out.trim()) throw new DuckError("duck.ai ka jawab khali aaya");
+          ok = true;
           return out.trim();
         }
         await page.waitForTimeout(saw ? 80 : 150);
@@ -378,7 +575,8 @@ export class DuckClient {
       await this.debug(page, `r${id}-timeout`);
       throw new DuckError("duck.ai timeout", "timeout");
     } finally {
-      await page.close().catch(() => {});
+      // reuse page ko caller sambhalta hai; hold wali page sirf success par khuli rehti hai
+      if (!reusePage && !(hold && ok)) await page.close().catch(() => {});
     }
   }
 
@@ -397,7 +595,8 @@ export class DuckClient {
   async close() {
     clearInterval(this.sweeper); this.sweeper = null;
     const rd = this.ready; this.ready = [];
-    await Promise.all(rd.map((p) => p.page.close().catch(() => {})));
+    const sessions = [...this.sessions.values()]; this.sessions.clear();
+    await Promise.all([...rd.map((p) => p.page.close().catch(() => {})), ...sessions.map((p) => p.page.close().catch(() => {}))]);
     try { await this.browser?.close(); } catch {}
     this.browser = null; this.ctx = null; this.starting = null;
   }

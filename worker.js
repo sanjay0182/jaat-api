@@ -23,7 +23,19 @@ const DUCK_MODELS = [
   "duck-auto", "gpt-5.6-luna", "gpt-5.4-mini", "claude-haiku-4-5",
   "mistral-small-2603", "tinfoil/gpt-oss-120b", "tinfoil/gemma4-31b",
 ];
-const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUCK_MODELS.includes(m));
+// duck.js ke ALIAS jaise naam (claude-sonnet, gpt-4o...) bhi duck par jayen - /v1/messages ke liye zaroori
+const DUCK_ALIASES = ["gpt-5.6", "gpt-5.4", "gpt-5", "gpt-4o", "gpt-4o-mini", "o3-mini", "claude-haiku", "claude-sonnet", "claude-opus", "mistral-small", "gpt-oss-120b", "gemma4-31b"];
+const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUCK_MODELS.includes(m) || DUCK_ALIASES.includes(m) || /^claude-/.test(m) || /^(gpt-|o\d)/.test(m));
+// legacy functions/function_call -> tools/tool_choice (sirf duck ke liye; free providers ko body untouched)
+function normalizeLegacy(j) {
+  if (j.tools || !Array.isArray(j.functions) || !j.functions.length) return { j, legacy: false };
+  const o = { ...j }, fc = o.function_call;
+  o.tools = o.functions.map((f) => ({ type: "function", function: f }));
+  o.tool_choice = fc === "none" ? "none" : fc && fc.name ? { type: "function", function: { name: fc.name } } : "auto";
+  delete o.functions; delete o.function_call;
+  return { j: o, legacy: true };
+}
+const MODELS_TTL_MS = 3600e3; // live catalog 1 ghante se purana ho to fallback list
 
 // stream state ko ek event (naya chunk / final result) tak ya ms tak ruko
 function waitEvt(st, ms) {
@@ -38,12 +50,15 @@ export class Hub {
     this.state = state; this.env = env;
     this.queue = []; this.pollers = []; this.waiters = new Map(); this.leased = new Map();
     this.streams = new Map(); // job id -> { chunks:[], last, fin, data, wake } (real streaming buffer)
+    this.duckModels = []; this.duckModelsAt = 0;
     this.lastSeen = 0; this.lastDispatch = 0; this.lastRequest = 0;
     state.blockConcurrencyWhile(async () => {
       this.lastRequest = (await state.storage.get("lastRequest")) || 0;
       this.keys = (await state.storage.get("keys")) || {};
       this.hourly = (await state.storage.get("hourly")) || {};
       this.logs = (await state.storage.get("logs")) || [];
+      this.duckModels = (await state.storage.get("duckModels")) || [];
+      this.duckModelsAt = (await state.storage.get("duckModelsAt")) || 0;
     });
     this.win = new Map();
   }
@@ -119,6 +134,14 @@ export class Hub {
       return Response.json({ keys: Object.values(this.keys).sort((x, y) => y.created - x.created), hourly: this.hourly, logs: this.logs, now });
     }
 
+    if (p === "/models") {
+      if (req.method === "GET") { const fresh = Date.now() - (this.duckModelsAt || 0) < MODELS_TTL_MS; return Response.json({ models: fresh ? this.duckModels || [] : [], updatedAt: this.duckModelsAt || 0 }); }
+      const body = await req.json().catch(() => ({}));
+      const models = Array.isArray(body.models) ? body.models.filter(x => typeof x === "string" || (x && typeof x.id === "string")) : [];
+      if (models.length) { this.duckModels = models.slice(0, 200); this.duckModelsAt = Date.now(); await this.state.storage.put({ duckModels: this.duckModels, duckModelsAt: this.duckModelsAt }); }
+      return Response.json({ ok: true, count: this.duckModels.length });
+    }
+
     if (p === "/submit") {
       // body: { provider: "jaat" | "duck" | "free", name, model, body }
       // Jis provider ko request gayi, wahi jawab dega. Koi fallback nahi: fail hua to uska asli error.
@@ -126,7 +149,7 @@ export class Hub {
       this.lastRequest = Date.now();
       await this.state.storage.put("lastRequest", this.lastRequest);
 
-      const provider = job.provider === "duck" ? "duck" : job.provider === "free" ? "free" : "jaat";
+      const provider = job.provider === "duck-image" ? "duck-image" : job.provider === "duck" ? "duck" : job.provider === "free" ? "free" : "jaat";
       const name = job.name; // free provider ka naam
       const model = String(job.model || "");
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
@@ -134,7 +157,7 @@ export class Hub {
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
       const label = provider === "free" ? name : provider === "duck" ? model : "vireonix";
 
-      const wait = provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000;
+      const wait = provider === "duck-image" ? Number(this.env.DUCK_IMAGE_WAIT_MS || 240000) : provider === "duck" ? duckWait : provider === "free" ? freeWait : 180000;
 
       // real streaming: sirf duck + stream=true. Pehla chunk aane tak normal (JSON error / fake-stream fallback) rasta
       if (provider === "duck" && job.stream === true) {
@@ -302,9 +325,196 @@ export class Hub {
   unlease(id) { clearTimeout(this.leased.get(id)); this.leased.delete(id); }
 }
 
+// ---- Anthropic / Responses <-> OpenAI chat translators ----------------------------------
+const textBlocks = (c) => typeof c === "string" ? c : Array.isArray(c) ? c.map((b) => typeof b === "string" ? b : (b && (b.text ?? b.input_text ?? b.output_text)) || "").filter(Boolean).join("\n") : "";
+const rid = (p) => p + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
+
+function anthropicToChat(a) {
+  const messages = [];
+  if (a.system) messages.push({ role: "system", content: textBlocks(a.system) });
+  for (const m of a.messages || []) {
+    if (!Array.isArray(m.content)) { messages.push({ role: m.role === "assistant" ? "assistant" : "user", content: m.content ?? "" }); continue; }
+    if (m.role === "assistant") {
+      const calls = m.content.filter((b) => b.type === "tool_use").map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input || {}) } }));
+      const t = textBlocks(m.content.filter((b) => b.type === "text"));
+      messages.push({ role: "assistant", content: t || (calls.length ? null : ""), ...(calls.length ? { tool_calls: calls } : {}) });
+    } else {
+      for (const b of m.content.filter((x) => x.type === "tool_result")) // tool results pehle (tool_use ke turant baad)
+        messages.push({ role: "tool", tool_call_id: b.tool_use_id, content: (b.is_error ? "Error: " : "") + textBlocks(b.content) });
+      const t = textBlocks(m.content.filter((x) => x.type === "text"));
+      if (t) messages.push({ role: "user", content: t });
+    }
+  }
+  const tools = (a.tools || []).filter((t) => t && t.name).map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema || { type: "object", properties: {} } } }));
+  const tc = a.tool_choice;
+  const tool_choice = !tc || !tools.length ? undefined : tc.type === "none" ? "none" : tc.type === "any" ? "required" : tc.type === "tool" ? { type: "function", function: { name: tc.name } } : "auto";
+  return { messages, tools, tool_choice };
+}
+
+function responsesToChat(a) {
+  const messages = [];
+  if (a.instructions) messages.push({ role: "system", content: a.instructions });
+  const items = typeof a.input === "string" ? [{ role: "user", content: a.input }] : Array.isArray(a.input) ? a.input : [];
+  for (const it of items) {
+    if (it.type === "function_call") {
+      const call = { id: it.call_id || it.id, type: "function", function: { name: it.name, arguments: typeof it.arguments === "string" ? it.arguments : JSON.stringify(it.arguments || {}) } };
+      const last = messages[messages.length - 1];
+      if (last && last.role === "assistant" && last.tool_calls && last.content == null) last.tool_calls.push(call); // parallel calls ek message me
+      else messages.push({ role: "assistant", content: null, tool_calls: [call] });
+    } else if (it.type === "function_call_output") {
+      messages.push({ role: "tool", tool_call_id: it.call_id, content: typeof it.output === "string" ? it.output : JSON.stringify(it.output ?? "") });
+    } else if (it.role || it.type === "message") {
+      messages.push({ role: it.role || "user", content: textBlocks(it.content) });
+    }
+  }
+  // Responses ke tools flat hote hain {type,name,parameters}; chat ke nested
+  const tools = (a.tools || []).filter((t) => t && t.type === "function" && (t.name || t.function?.name)).map((t) => t.function ? t : { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters || { type: "object", properties: {} } } });
+  const tc = a.tool_choice;
+  const tool_choice = !tc || !tools.length ? undefined : typeof tc === "string" ? tc : tc.type === "function" ? { type: "function", function: { name: tc.name || tc.function?.name } } : "auto";
+  return { messages, tools, tool_choice };
+}
+
+// OpenAI SSE ko Anthropic / Responses events me badlo. Text + tool_calls dono, error par saaf end.
+function translateStream(r, kind, model) {
+  const dec = new TextDecoder(), enc = new TextEncoder(), anth = kind === "anthropic";
+  const reader = r.body.getReader();
+  const respId = rid(anth ? "msg_" : "resp_"), created = Math.floor(Date.now() / 1000);
+  return new ReadableStream({
+    async start(ctrl) {
+      let seqn = 0, started = false, finished = false, full = "", outTok = 0;
+      const send = (event, data) => { if (!anth) data.sequence_number = seqn++; ctrl.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)); };
+      // anthropic state
+      let nextIdx = 0, textIdx = -1, textOpen = false;
+      const aTools = new Map(); // openai tool index -> {idx,open}
+      // responses state
+      const items = []; let msgItem = null, msgOi = -1;
+      const rTools = new Map(); // openai tool index -> {item, oi, args}
+      const respObj = (status) => ({ id: respId, object: "response", created_at: created, status, model, output: status === "completed" ? items.map((x) => x.final || x) : [], ...(status === "completed" ? { output_text: full } : {}) });
+
+      const begin = () => {
+        if (started) return; started = true;
+        if (anth) send("message_start", { type: "message_start", message: { id: respId, type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+        else { send("response.created", { type: "response.created", response: respObj("in_progress") }); send("response.in_progress", { type: "response.in_progress", response: respObj("in_progress") }); }
+      };
+      const closeMsgR = () => {
+        if (!msgItem) return;
+        const part = { type: "output_text", text: full, annotations: [] };
+        send("response.output_text.done", { type: "response.output_text.done", item_id: msgItem.id, output_index: msgOi, content_index: 0, text: full });
+        send("response.content_part.done", { type: "response.content_part.done", item_id: msgItem.id, output_index: msgOi, content_index: 0, part });
+        msgItem.final = { ...msgItem, status: "completed", content: [part] };
+        send("response.output_item.done", { type: "response.output_item.done", output_index: msgOi, item: msgItem.final });
+        msgItem = null;
+      };
+      const onText = (t) => {
+        begin(); full += t; outTok += Math.ceil(t.length / 4);
+        if (anth) {
+          if (!textOpen) { textOpen = true; textIdx = nextIdx++; send("content_block_start", { type: "content_block_start", index: textIdx, content_block: { type: "text", text: "" } }); }
+          send("content_block_delta", { type: "content_block_delta", index: textIdx, delta: { type: "text_delta", text: t } });
+        } else {
+          if (!msgItem) {
+            msgOi = items.length; msgItem = { id: rid("msg_"), type: "message", status: "in_progress", role: "assistant", content: [] }; items.push(msgItem);
+            send("response.output_item.added", { type: "response.output_item.added", output_index: msgOi, item: msgItem });
+            send("response.content_part.added", { type: "response.content_part.added", item_id: msgItem.id, output_index: msgOi, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+          }
+          send("response.output_text.delta", { type: "response.output_text.delta", item_id: msgItem.id, output_index: msgOi, content_index: 0, delta: t });
+        }
+      };
+      const onTool = (tc) => {
+        begin();
+        const i = tc.index ?? 0, name = tc.function?.name, args = tc.function?.arguments || "";
+        if (anth) {
+          if (textOpen) { send("content_block_stop", { type: "content_block_stop", index: textIdx }); textOpen = false; }
+          let st = aTools.get(i);
+          if (!st) { st = { idx: nextIdx++, open: true }; aTools.set(i, st); send("content_block_start", { type: "content_block_start", index: st.idx, content_block: { type: "tool_use", id: tc.id || rid("toolu_"), name: name || "", input: {} } }); }
+          if (args) send("content_block_delta", { type: "content_block_delta", index: st.idx, delta: { type: "input_json_delta", partial_json: args } });
+        } else {
+          closeMsgR();
+          let st = rTools.get(i);
+          if (!st) {
+            const item = { id: rid("fc_"), type: "function_call", status: "in_progress", call_id: tc.id || rid("call_"), name: name || "", arguments: "" };
+            st = { item, oi: items.length, args: "" }; items.push(item); rTools.set(i, st);
+            send("response.output_item.added", { type: "response.output_item.added", output_index: st.oi, item });
+          }
+          if (args) { st.args += args; send("response.function_call_arguments.delta", { type: "response.function_call_arguments.delta", item_id: st.item.id, output_index: st.oi, delta: args }); }
+        }
+      };
+      const finish = (fr) => {
+        if (finished) return; finished = true; begin();
+        if (anth) {
+          if (textOpen) send("content_block_stop", { type: "content_block_stop", index: textIdx });
+          for (const st of aTools.values()) send("content_block_stop", { type: "content_block_stop", index: st.idx });
+          send("message_delta", { type: "message_delta", delta: { stop_reason: fr === "tool_calls" || fr === "function_call" ? "tool_use" : fr === "length" ? "max_tokens" : "end_turn", stop_sequence: null }, usage: { output_tokens: outTok || Math.ceil(full.length / 4) } });
+          send("message_stop", { type: "message_stop" });
+        } else {
+          closeMsgR();
+          for (const st of rTools.values()) {
+            send("response.function_call_arguments.done", { type: "response.function_call_arguments.done", item_id: st.item.id, output_index: st.oi, arguments: st.args });
+            st.item.final = { ...st.item, status: "completed", arguments: st.args };
+            send("response.output_item.done", { type: "response.output_item.done", output_index: st.oi, item: st.item.final });
+          }
+          send("response.completed", { type: "response.completed", response: { ...respObj("completed"), usage: { input_tokens: 0, output_tokens: outTok || Math.ceil(full.length / 4), total_tokens: outTok || Math.ceil(full.length / 4) } } });
+        }
+      };
+      const fail = (message) => {
+        if (finished) return;
+        begin();
+        if (anth) send("error", { type: "error", error: { type: "api_error", message } });
+        else send("response.failed", { type: "response.failed", response: { ...respObj("failed"), error: { code: "server_error", message } } });
+        if (anth) finish("stop"); else finished = true; // anthropic: error ke baad message_stop bhi do
+      };
+      let buf = "";
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n\n")) >= 0) {
+            const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+            const line = frame.split("\n").find((x) => x.startsWith("data: "));
+            if (!line) continue;
+            const raw = line.slice(6);
+            if (raw === "[DONE]") continue;
+            let ev; try { ev = JSON.parse(raw); } catch { continue; }
+            if (ev.error) { fail(String(ev.error.message || ev.error)); continue; }
+            const c = ev.choices && ev.choices[0];
+            if (!c) continue;
+            const d = c.delta || {};
+            if (d.content) onText(d.content);
+            if (Array.isArray(d.tool_calls)) d.tool_calls.forEach(onTool);
+            if (d.function_call) onTool({ index: 0, id: rid("call_"), function: d.function_call }); // legacy
+            if (c.finish_reason) finish(c.finish_reason);
+          }
+        }
+        finish("stop"); // upstream bina finish_reason ke band hui
+      } catch (e) { fail(String((e && e.message) || e)); }
+      finally { try { ctrl.close(); } catch {} }
+    },
+    cancel() { try { reader.cancel(); } catch {} },
+  });
+}
+
+// non-stream chat.completion -> Anthropic message / Responses object
+function translateFull(data, kind, model) {
+  const c = data.choices?.[0], m = c?.message || { content: "" };
+  const calls = m.tool_calls || (m.function_call ? [{ id: rid("call_"), type: "function", function: m.function_call }] : []);
+  const inTok = data.usage?.prompt_tokens || 0, outTok = data.usage?.completion_tokens || 0;
+  if (kind === "anthropic") {
+    const content = [];
+    if (m.content) content.push({ type: "text", text: m.content });
+    for (const tc of calls) { let input = {}; try { input = JSON.parse(tc.function.arguments || "{}"); } catch {} content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input }); }
+    if (!content.length) content.push({ type: "text", text: "" });
+    return { id: rid("msg_"), type: "message", role: "assistant", content, model, stop_reason: calls.length ? "tool_use" : c?.finish_reason === "length" ? "max_tokens" : "end_turn", stop_sequence: null, usage: { input_tokens: inTok, output_tokens: outTok } };
+  }
+  const output = [];
+  if (m.content || !calls.length) output.push({ id: rid("msg_"), type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: m.content || "", annotations: [] }] });
+  for (const tc of calls) output.push({ id: rid("fc_"), type: "function_call", status: "completed", call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments || "{}" });
+  return { id: rid("resp_"), object: "response", created_at: data.created || Math.floor(Date.now() / 1000), status: "completed", model, output, output_text: m.content || "", usage: { input_tokens: inTok, output_tokens: outTok, total_tokens: inTok + outTok } };
+}
+
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "authorization,content-type",
+  "access-control-allow-headers": "authorization,content-type,x-api-key,x-conversation-id,anthropic-version,anthropic-beta",
   "access-control-allow-methods": "GET,POST,OPTIONS",
 };
 const withCors = (r) => {
@@ -316,7 +526,7 @@ const withCors = (r) => {
 async function handle(req, env) {
   const u = new URL(req.url);
   const hub = env.HUB.get(env.HUB.idFromName("hub"));
-  const auth = (req.headers.get("authorization") || "").replace("Bearer ", "");
+  const auth = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || req.headers.get("x-api-key") || "";
   const legacy = !!env.USER_KEYS && env.USER_KEYS.split(",").includes(auth); // purani USER_KEYS bhi chalti rahengi
   const gate = async (count) => {
     if (legacy) return { ok: true };
@@ -333,14 +543,46 @@ async function handle(req, env) {
   if (u.pathname === "/v1/models") {
     const g = await gate(false);
     if (!g.ok) return deny(g);
+    const catalog = await hub.fetch("https://hub/models").then(r => r.json()).catch(() => ({ models: [] }));
+    const liveModels = Array.isArray(catalog.models) ? catalog.models : [];
+    const liveById = new Map(liveModels.filter(x => x && typeof x === "object" && x.id).map(x => [x.id, x]));
     return Response.json({
       object: "list",
       data: [
         { id: "jaat-default", object: "model", created: 0, owned_by: "jaat" },
-        ...DUCK_MODELS.map(id => ({ id, object: "model", created: 0, owned_by: "duck.ai" })),
+        ...[...new Set([...DUCK_MODELS, ...liveModels.map(x => typeof x === "string" ? x : x.id).filter(Boolean)])].map(id => ({ ...(liveById.get(id) || {}), id, object: "model", created: 0, owned_by: "duck.ai" })),
         ...FREE_PROVIDERS.map(p => ({ id: p.name, object: "model", created: 0, owned_by: new URL(p.base).hostname })),
       ],
     });
+  }
+
+  // Anthropic Messages + OpenAI Responses route: common chat pipeline (streaming, tools, session reuse) reuse hoti hai.
+  if (u.pathname === "/v1/messages" || u.pathname === "/v1/responses") {
+    let a; try { a = await req.json(); } catch { return Response.json({ error: { message: "bad json", type: "invalid_request_error" } }, { status: 400 }); }
+    const kind = u.pathname === "/v1/messages" ? "anthropic" : "responses";
+    const model = a.model || "duck-auto";
+    const t = kind === "anthropic" ? anthropicToChat(a) : responsesToChat(a);
+    const chatBody = { model, messages: t.messages, stream: !!a.stream, tools: t.tools.length ? t.tools : undefined, tool_choice: t.tool_choice, max_tokens: a.max_tokens || a.max_output_tokens || 1024, conversation_id: a.conversation_id || req.headers.get("x-conversation-id") || a.user || a.metadata?.user_id };
+    const chatReq = new Request(new URL("/v1/chat/completions", req.url), { method: "POST", headers: { authorization: req.headers.get("authorization") || "", "x-api-key": req.headers.get("x-api-key") || "", "content-type": "application/json" }, body: JSON.stringify(chatBody) });
+    const r = await handle(chatReq, env);
+    const errOut = (data, status) => kind === "anthropic"
+      ? Response.json({ type: "error", error: { type: data?.error?.type || "api_error", message: data?.error?.message || "error" } }, { status })
+      : Response.json(data, { status });
+    if (a.stream && r.ok && r.headers.get("content-type")?.includes("text/event-stream"))
+      return new Response(translateStream(r, kind, model), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "" } });
+    let data; try { data = await r.json(); } catch { return r; }
+    if (!r.ok) return errOut(data, r.status);
+    if (a.stream) { // upstream ne JSON diya (stream nahi): chhota fake event stream banao
+      const fake = new Response(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: data.choices?.[0]?.message?.content || "", ...(data.choices?.[0]?.message?.tool_calls ? { tool_calls: data.choices[0].message.tool_calls.map((tc, i) => ({ index: i, ...tc })) } : {}) }, finish_reason: data.choices?.[0]?.finish_reason || "stop" }] })}\n\ndata: [DONE]\n\n`);
+      return new Response(translateStream(fake, kind, model), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+    }
+    return Response.json(translateFull(data, kind, model), { headers: { "x-jaat-provider": r.headers.get("x-jaat-provider") || "" } });
+  }
+
+  if (u.pathname === "/v1/images/generations") {
+    const g = await gate(false); if (!g.ok) return deny(g); // unsupported hai, isliye request count nahi hoti
+    // Native duck.ai image tool ke result transport ka reliable selector abhi verified nahi hai.
+    return Response.json({ error: { message: "Image generation unavailable: duck.ai native image tool/result stream is not verified in this build; no fake image was returned.", type: "unsupported_capability" } }, { status: 501 });
   }
 
   if (u.pathname === "/v1/chat/completions") {
@@ -350,10 +592,11 @@ async function handle(req, env) {
     if (!g.ok) return deny(g);
     const t0 = Date.now();
     const wantStream = j.stream === true;
-    const duck = isDuckModel(j.model);
-    const free = !duck && isFreeModel(j.model);
+    const catalog = await hub.fetch("https://hub/models").then(r => r.json()).catch(() => ({ models: [] }));
+    const free = isFreeModel(j.model); // free provider ka exact naam sabse pehle
+    const duck = !free && (isDuckModel(j.model) || (catalog.models || []).some(x => (typeof x === "string" ? x : x.id) === j.model));
     const shownModel = duck || free ? j.model : "jaat-default";
-    j.stream = false; delete j.stream_options;
+    const inputStream = j.stream === true; delete j.stream_options;
 
     // jaat (vireonix) wali body: model "auto" + cache todne ke liye random note
     const jaatBody = () => {
@@ -361,10 +604,14 @@ async function handle(req, env) {
       k.messages = [{ role: "system", content: "ref " + crypto.randomUUID().slice(0, 8) }, ...(j.messages || [])];
       return JSON.stringify(k);
     };
+    // conversation_id ko api key ke hisaab se namespace karo (do keys ke ids na takrayen)
+    const cidRaw = j.conversation_id || req.headers.get("x-conversation-id") || j.user || "";
+    const cid = cidRaw ? String(g.id || "legacy") + ":" + String(cidRaw).slice(0, 150) : "";
+    const lg = duck ? normalizeLegacy(j) : { j, legacy: false };
     const job = duck
-      ? { provider: "duck", model: j.model, stream: wantStream, body: JSON.stringify({ model: j.model, messages: j.messages || [], reasoning_effort: j.reasoning_effort || j.reasoningEffort }) }
+      ? { provider: "duck", model: j.model, stream: wantStream, body: JSON.stringify({ ...lg.j, stream: false, model: j.model, messages: j.messages || [], conversation_id: cid, legacy_fn: lg.legacy, reasoning_effort: j.reasoning_effort || j.reasoningEffort }) }
       : free
-      ? { provider: "free", name: j.model, body: JSON.stringify({ messages: j.messages || [] }) }
+      ? { provider: "free", name: j.model, body: JSON.stringify({ ...j, stream: false, messages: j.messages || [] }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
@@ -382,14 +629,18 @@ async function handle(req, env) {
       model: shownModel,
     };
     const ev = (x) => "data: " + JSON.stringify({ ...base, ...x }) + "\n\n";
+    const firstDelta = { role: "assistant" };
+    if (c.message && c.message.function_call) firstDelta.function_call = c.message.function_call;
+    else if (c.message && Array.isArray(c.message.tool_calls)) firstDelta.tool_calls = c.message.tool_calls.map((tc, i) => ({ index: i, id: tc.id, type: tc.type || "function", function: tc.function }));
+    else firstDelta.content = (c.message && c.message.content) || "";
     const body =
-      ev({ choices: [{ index: 0, delta: { role: "assistant", content: (c.message && c.message.content) || "" }, finish_reason: null }] }) +
+      ev({ choices: [{ index: 0, delta: firstDelta, finish_reason: null }] }) +
       ev({ choices: [{ index: 0, delta: {}, finish_reason: c.finish_reason || "stop" }] }) +
       "data: [DONE]\n\n";
     return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "", "x-jaat-duck-error": r.headers.get("x-jaat-duck-error") || "", "x-jaat-duck-skipped": r.headers.get("x-jaat-duck-skipped") || "" } });
   }
 
-  if (["/next", "/result", "/ack", "/status", "/chunk"].includes(u.pathname)) {
+  if (["/next", "/result", "/ack", "/status", "/chunk", "/models"].includes(u.pathname)) {
     if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
     return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
   }
