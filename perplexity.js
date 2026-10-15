@@ -147,6 +147,16 @@ function answerFromSSE(raw) {
   return best;
 }
 
+// DOM se text lene par citation chips (britannica, +1, worldometers...) saath aa jate hain - unhe hatao.
+// Sirf akele source-jaise lines hatate hain; kuch bacha hi na to original wapas.
+function cleanDom(t) {
+  const lines = String(t || "").split(/\r?\n/);
+  const isChip = (l) => { const x = l.trim(); return /^\+\d+$/.test(x) || (x.length > 0 && x.length <= 32 && /^[a-z0-9][a-z0-9.\-]*$/.test(x) && !/^\d+$/.test(x)); };
+  const kept = lines.filter((l) => !isChip(l));
+  const out = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out && kept.length < lines.length && kept.some((l) => /\s/.test(l.trim())) ? out : String(t || "").trim();
+}
+
 function completion(model, text) {
   return JSON.stringify({
     id: "chatcmpl-pplx-" + Date.now().toString(36),
@@ -259,18 +269,18 @@ export class PplxClient {
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
-        if (net && sse) return completion(model || DEFAULT_MODEL, net.trim()); // SSE poora aate hi turant
+        if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
         const txt = n ? (await els.nth(n - 1).innerText().catch(() => "")).trim() : "";
         if (txt) started = true;
         const generating = (await page.locator(SEL.stop).count().catch(() => 0)) > 0;
-        if (txt && txt === last && !generating) { if (++stable >= 4) return completion(model || DEFAULT_MODEL, txt); } // ~1.4s same text
+        if (txt && txt === last && !generating) { if (++stable >= 4) { console.log("pplx: jawab DOM se; sse mila:", sse ? "haan, parse khali (" + sse.slice(0, 160).replace(/\s+/g, " ") + ")" : "nahi"); return completion(model || DEFAULT_MODEL, cleanDom(txt)); } } // ~1.4s same text
         else stable = 0;
         last = txt;
       }
       await this.debug(page, started ? "partial" : "timeout");
-      if (last) return completion(model || DEFAULT_MODEL, last); // adhura hi sahi
+      if (last) return completion(model || DEFAULT_MODEL, cleanDom(last)); // adhura hi sahi
       throw new PplxError("perplexity.ai timeout", "timeout");
     } finally {
       try { await h?.page?.close(); } catch {}
