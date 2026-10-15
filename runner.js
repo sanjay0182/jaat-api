@@ -1,6 +1,7 @@
 // Har run ~3 min chalta hai. Agle run ko 2 min par start karta hai (overlap),
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
 import { DuckClient } from "./duck.js";
+import { PplxClient } from "./perplexity.js";
 import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
 import { callFree } from "./free-call.mjs";
 
@@ -21,6 +22,10 @@ const MAX_TRIES = 1; // 1 = normal mode, ek request ke liye vireonix ko sirf ek 
 const duck = new DuckClient();
 const DUCK_TIMEOUT_MS = Number(process.env.DUCK_TIMEOUT_MS || 80000);
 const DUCK_IMAGE_TIMEOUT_MS = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000);
+
+// perplexity.ai provider (real Chrome, basic chat). Chrome pehli pplx request par hi khulta hai.
+const pplx = new PplxClient();
+const PPLX_TIMEOUT_MS = Number(process.env.PPLX_TIMEOUT_MS || 100000);
 
 const start = Date.now();
 duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
@@ -134,6 +139,9 @@ async function handle({ id, provider, name, body, stream }) {
     } else if (provider === "duck-image") {
       const j = JSON.parse(body);
       data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS, j.size); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
+    } else if (provider === "perplexity") {
+      const j = JSON.parse(body);
+      data = await pplx.chat({ model: j.model, messages: j.messages }, PPLX_TIMEOUT_MS);
     } else if (provider === "free") {
       const p = FREE_PROVIDERS.find((x) => x.name === name);
       if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
@@ -178,4 +186,5 @@ while (true) {
 while (inflight > 0) await sleep(200);
 clearInterval(modelRefresh);
 await duck.close();
+await pplx.close();
 process.exit(0);
