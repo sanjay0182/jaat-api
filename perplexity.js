@@ -36,6 +36,31 @@ async function dismissPopups(page) {
     try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 1500 }); } catch {}
   }
 }
+// Cloudflare "Just a moment..." challenge: kuch der ruko (headed Chrome me aksar khud paas ho jata hai),
+// aur turnstile checkbox dikhe to use click karo. True = page aage badh gaya.
+async function passChallenge(page, ms = 35000) {
+  const isChallenge = async () => {
+    const title = (await page.title().catch(() => "")).toLowerCase();
+    if (/just a moment|attention required|security verification/.test(title)) return true;
+    const body = (await page.innerText("body").catch(() => "")).toLowerCase();
+    return /performing security verification|verify you are human|checking your browser/.test(body);
+  };
+  if (!(await isChallenge())) return true;
+  console.log("pplx: cloudflare challenge mila, intezaar...");
+  const end = Date.now() + ms;
+  let tries = 0;
+  while (Date.now() < end) {
+    await page.waitForTimeout(2000);
+    if (!(await isChallenge())) { console.log("pplx: challenge paas"); await page.waitForTimeout(1500); return true; }
+    if (tries++ % 2 === 0) { // turnstile iframe ke andar checkbox dabao
+      for (const f of page.frames()) {
+        if (!/challenges\.cloudflare\.com|turnstile/.test(f.url())) continue;
+        try { await f.locator('input[type="checkbox"], label, body').first().click({ timeout: 2000, position: { x: 20, y: 20 } }); } catch {}
+      }
+    }
+  }
+  return false;
+}
 // page kya dikha raha hai - error message me jata hai (API ke 502 me bhi dikhega)
 async function pageInfo(page) {
   const title = await page.title().catch(() => "");
@@ -188,6 +213,7 @@ export class PplxClient {
       await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(30000, timeoutMs) });
 
       await page.waitForTimeout(2500);
+      await passChallenge(page);
       await dismissPopups(page);
       const box = page.locator(SEL.input).first();
       try { await box.waitFor({ state: "visible", timeout: 25000 }); }
