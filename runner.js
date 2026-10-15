@@ -2,6 +2,7 @@
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
 import { DuckClient } from "./duck.js";
 import { PplxClient } from "./perplexity.js";
+import { CgptClient } from "./chatgpt.js";
 import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
 import { callFree } from "./free-call.mjs";
 
@@ -26,6 +27,10 @@ const DUCK_IMAGE_TIMEOUT_MS = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000
 // perplexity.ai provider (real Chrome, basic chat). Chrome pehli pplx request par hi khulta hai.
 const pplx = new PplxClient();
 const PPLX_TIMEOUT_MS = Number(process.env.PPLX_TIMEOUT_MS || 130000);
+
+// chatgpt.com provider (real Chrome, guest mode, basic chat). Chrome pehli chatgpt request par hi khulta hai.
+const cgpt = new CgptClient();
+const CGPT_TIMEOUT_MS = Number(process.env.CGPT_TIMEOUT_MS || 130000);
 
 const start = Date.now();
 duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
@@ -142,6 +147,9 @@ async function handle({ id, provider, name, body, stream }) {
     } else if (provider === "perplexity") {
       const j = JSON.parse(body);
       data = await pplx.chat({ model: j.model, messages: j.messages }, PPLX_TIMEOUT_MS);
+    } else if (provider === "chatgpt") {
+      const j = JSON.parse(body);
+      data = await cgpt.chat({ model: j.model, messages: j.messages }, CGPT_TIMEOUT_MS);
     } else if (provider === "free") {
       const p = FREE_PROVIDERS.find((x) => x.name === name);
       if (!p) throw new Error("free model '" + name + "' PROVIDERS list me nahi mila");
@@ -187,4 +195,5 @@ while (inflight > 0) await sleep(200);
 clearInterval(modelRefresh);
 await duck.close();
 await pplx.close();
+await cgpt.close();
 process.exit(0);
