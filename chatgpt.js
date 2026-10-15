@@ -24,7 +24,8 @@ export const DEFAULT_MODEL = "chatgpt-guest";
 const MAX_PAGES = Number(process.env.CGPT_MAX_PAGES || 1); // guest ko ek waqt me ek hi conversation milti hai
 const MAX_PROMPT = Number(process.env.CGPT_MAX_PROMPT || 12000);
 const WARM_MAX_MS = Number(process.env.CGPT_WARM_MAX_MS || 120000); // garam page ki umar
-const PREWARM = process.env.CGPT_PREWARM !== "0"; // 0 = pehle se page mat kholo (datacenter IP par kam hit)
+const PREWARM = process.env.CGPT_PREWARM === "1"; // default band: guest ko ek waqt me ek hi chat, doosra page "Clear current chat?" dikhata hai
+const FRESH = process.env.CGPT_FRESH !== "0"; // har request ka apna naya browser session (chats takrate nahi)
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
 // page ke selectors - chatgpt badle to sirf yahan theek karo
@@ -153,7 +154,7 @@ export class CgptClient {
   }
 
   async ensure() {
-    if (this.ctx) return;
+    if (this.browser) return;
     if (!this.starting) this.starting = (async () => {
       const { chromium } = await loadPlaywright();
       const headless = process.env.DUCK_HEADED !== "1";
@@ -162,13 +163,23 @@ export class CgptClient {
       if (exe) launch.executablePath = exe; else launch.channel = "chrome";
       this.browser = await chromium.launch(launch);
       const ver = this.browser.version();
-      const ua = process.env.CGPT_UA ||
+      this.ua = process.env.CGPT_UA ||
         `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Safari/537.36`;
-      this.ctx = await this.browser.newContext({ userAgent: ua, locale: "en-US", viewport: { width: 1280, height: 800 } });
-      await this.ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} });
-      console.log("cgpt: chrome ready", ver, headless ? "(headless)" : "(headed)");
+      console.log("cgpt: chrome ready", ver, headless ? "(headless)" : "(headed)", FRESH ? "fresh-session" : "shared-session");
     })().catch((e) => { this.starting = null; throw e; });
     await this.starting;
+  }
+
+  // FRESH: har page ka naya context (alag cookies/storage). Warna ek shared context.
+  async newCtx() {
+    const ctx = await this.browser.newContext({ userAgent: this.ua, locale: "en-US", viewport: { width: 1280, height: 800 } });
+    await ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} });
+    return ctx;
+  }
+  async getCtx() {
+    if (FRESH) return await this.newCtx();
+    if (!this.ctx) this.ctx = await this.newCtx();
+    return this.ctx;
   }
 
   async slot() { if (this.active >= MAX_PAGES) await new Promise((r) => this.waiters.push(r)); this.active++; }
@@ -187,7 +198,8 @@ export class CgptClient {
 
   // naya page kholo, challenge paar karo, popups hatao, input box tak pahuncho. Fail hone par saaf error.
   async open(budgetMs = 60000) {
-    const page = await this.ctx.newPage();
+    const ctx = await this.getCtx();
+    const page = await ctx.newPage();
     try {
       await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(25000, budgetMs) });
       await passChallenge(page);
@@ -209,19 +221,19 @@ export class CgptClient {
           throw new CgptError("chatgpt.com input box nahi mila | " + info.slice(0, 380), "error");
         }
       }
-      return { page, box, t: Date.now() };
-    } catch (e) { try { await page.close(); } catch {} throw e; }
+      return { page, box, ctx, t: Date.now() };
+    } catch (e) { try { await page.close(); } catch {} if (FRESH) { try { await ctx.close(); } catch {} } throw e; }
   }
 
   // agli request ke liye ek page pehle se garam rakho (background me)
   prewarm() {
-    if (!PREWARM || this.warm || !this.ctx) return;
+    if (!PREWARM || FRESH || this.warm || !this.browser) return;
     this.warm = this.open(45000).catch((e) => { console.log("cgpt prewarm fail:", e.message.slice(0, 120)); return null; });
   }
 
-  // session reset: cookies saaf + garam page band (naya anonymous session agli baar)
+  // session reset: shared ho to cookies saaf + garam page band (FRESH me har request naya session hai)
   async reset() {
-    try { await this.ctx.clearCookies(); } catch {}
+    try { if (this.ctx) await this.ctx.clearCookies(); } catch {}
     try { const w = this.warm ? await this.warm : null; this.warm = null; await w?.page?.close(); } catch {}
   }
 
@@ -249,6 +261,13 @@ export class CgptClient {
     if (!t) return;
     if (/limit|too many|reached|come back|try again later/i.test(t) && !/cookie/i.test(t))
       await this.fail(page, "limit", "chatgpt.com guest limit: " + t.slice(0, 160), "ratelimit");
+    if (/clear current chat/i.test(t)) { // guest warning: sirf Escape. "Clear chat" / "Log in" kabhi mat dabao
+      try { await page.keyboard.press("Escape"); } catch {}
+      if (!st.seen) st.seen = Date.now();
+      if (Date.now() - st.seen > 8000)
+        await this.fail(page, "clearchat", "chatgpt.com 'Clear current chat?' dialog band nahi hua | dialog: " + t.slice(0, 200), "ratelimit");
+      return;
+    }
     await dismissPopups(page);
     try { await page.locator('a:has-text("Stay logged out"), button:has-text("Stay logged out"), [role="dialog"] button[aria-label*="Close" i]').first().click({ timeout: 1500 }); } catch {}
     if (/log ?in|sign ?up/i.test(t) && !/cookie/i.test(t)) {
@@ -315,6 +334,7 @@ export class CgptClient {
       throw new CgptError("chatgpt.com timeout", "timeout");
     } finally {
       try { await h?.page?.close(); } catch {}
+      if (FRESH) { try { await h?.ctx?.close(); } catch {} }
       this.free();
     }
   }
