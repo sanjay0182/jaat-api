@@ -23,11 +23,12 @@ const BASE = process.env.CGPT_BASE || "https://chatgpt.com";
 export const DEFAULT_MODEL = "chatgpt-guest";
 const MAX_PAGES = Number(process.env.CGPT_MAX_PAGES || 1); // guest ko ek waqt me ek hi conversation milti hai
 const MAX_PROMPT = Number(process.env.CGPT_MAX_PROMPT || 12000);
+const NOANS_MS = Number(process.env.CGPT_NOANS_MS || 35000); // message ke baad itne me jawab shuru na ho to jaldi fail (screenshot + status ke saath)
 const WARM_MAX_MS = Number(process.env.CGPT_WARM_MAX_MS || 120000); // garam page ki umar
 const PREWARM = process.env.CGPT_PREWARM === "1"; // default band: guest ko ek waqt me ek hi chat, doosra page "Clear current chat?" dikhata hai
 const FRESH = process.env.CGPT_FRESH !== "0"; // har request ka apna naya browser session (chats takrate nahi)
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
-const [VW, VH] = String(process.env.CGPT_VIEWPORT || "700x900").split("x").map(Number); // chhoti width = sidebar / "New chat" chhupa rehta hai
+const [VW, VH] = String(process.env.CGPT_VIEWPORT || "1366x768").split("x").map(Number); // asli desktop jaisa size (xvfb screen bhi run.yml me yahi hai)
 
 // page ke selectors - chatgpt badle to sirf yahan theek karo
 const SEL = {
@@ -181,7 +182,7 @@ export class CgptClient {
     if (!this.starting) this.starting = (async () => {
       const { chromium } = await loadPlaywright();
       const headless = process.env.DUCK_HEADED !== "1";
-      const launch = { headless, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] };
+      const launch = { headless, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", `--window-size=${VW},${VH}`, "--window-position=0,0"] };
       const exe = chromePath();
       if (exe) launch.executablePath = exe; else launch.channel = "chrome";
       this.browser = await chromium.launch(launch);
@@ -367,10 +368,23 @@ export class CgptClient {
 
       // jawab aane tak ruko: DOM me text thehar jaye
       const st = { dlgText: "" };
-      let last = "", stable = 0, started = false, tick = 0;
+      const sentAt = Date.now();
+      let last = "", stable = 0, started = false, tick = 0, lastLog = 0;
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         await this.checkNet(net, page);
+        if (!started && Date.now() - lastLog > 5000) { // status line: kya dikh raha hai
+          lastLog = Date.now();
+          const u = await page.locator(SEL.user).count().catch(() => 0);
+          const a = await page.locator(SEL.answer).count().catch(() => 0);
+          const dg = await page.locator(SEL.dialog).count().catch(() => 0);
+          console.log(`cgpt: wait ${Math.round((Date.now() - sentAt) / 1000)}s user_msg=${u} answer=${a} dialog=${dg} net=${net.status || "-"}`);
+        }
+        if (!started && Date.now() - sentAt > NOANS_MS) { // jaldi fail: message gaya ya nahi, page par kya hai
+          const u = await page.locator(SEL.user).count().catch(() => 0);
+          const info = await pageInfo(page);
+          await this.fail(page, "noanswer", `chatgpt.com ${Math.round(NOANS_MS / 1000)}s me jawab shuru nahi hua | message_gaya=${u ? "haan" : "NAHI"} | dialog=${st.dlgText ? st.dlgText.slice(0, 120) : "nahi"} | ${info.slice(0, 200)}`, u ? "timeout" : "error");
+        }
         if (!started || tick % 6 === 0) await this.checkDialog(page, st);
         tick++;
         const els = page.locator(SEL.answer);
