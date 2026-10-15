@@ -27,6 +27,7 @@ const WARM_MAX_MS = Number(process.env.CGPT_WARM_MAX_MS || 120000); // garam pag
 const PREWARM = process.env.CGPT_PREWARM === "1"; // default band: guest ko ek waqt me ek hi chat, doosra page "Clear current chat?" dikhata hai
 const FRESH = process.env.CGPT_FRESH !== "0"; // har request ka apna naya browser session (chats takrate nahi)
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
+const [VW, VH] = String(process.env.CGPT_VIEWPORT || "700x900").split("x").map(Number); // chhoti width = sidebar / "New chat" chhupa rehta hai
 
 // page ke selectors - chatgpt badle to sirf yahan theek karo
 const SEL = {
@@ -194,8 +195,16 @@ export class CgptClient {
 
   // FRESH: har page ka naya context (alag cookies/storage). Warna ek shared context.
   async newCtx() {
-    const ctx = await this.browser.newContext({ userAgent: this.ua, locale: "en-US", viewport: { width: 1280, height: 800 } });
+    const ctx = await this.browser.newContext({ userAgent: this.ua, locale: "en-US", viewport: { width: VW, height: VH } });
     await ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} });
+    // diagnostic: har click / Enter ka target console me (runner log me "cgpt-evt:" ke naam se dikhega)
+    await ctx.addInitScript(() => {
+      try {
+        const d = (e) => { try { return [e.tagName, e.getAttribute("aria-label") || "", e.getAttribute("data-testid") || "", (e.innerText || "").replace(/\s+/g, " ").slice(0, 40)].join("|"); } catch { return "?"; } };
+        document.addEventListener("click", (e) => console.log("__cgpt click " + d(e.target)), true);
+        document.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "Escape" || e.ctrlKey) console.log("__cgpt key " + e.key + (e.ctrlKey ? "+ctrl" : "") + (e.shiftKey ? "+shift" : "") + " on " + d(document.activeElement)); }, true);
+      } catch {}
+    });
     return ctx;
   }
   async getCtx() {
@@ -222,6 +231,7 @@ export class CgptClient {
   async open(budgetMs = 60000) {
     const ctx = await this.getCtx();
     const page = await ctx.newPage();
+    page.on("console", (m) => { try { const t = m.text(); if (t.startsWith("__cgpt ")) console.log("cgpt-evt:", t.slice(7)); } catch {} });
     try {
       await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(25000, budgetMs) });
       await passChallenge(page);
@@ -316,6 +326,9 @@ export class CgptClient {
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
       await page.waitForTimeout(400);
+      // Enter tabhi dabao jab textbox hi focused ho (nahi to Enter kisi aur button par lag sakta hai)
+      const inBox = await page.evaluate((sel) => { const a = document.activeElement; return !!a && !!a.closest && !!a.closest(sel); }, SEL.input).catch(() => false);
+      if (!inBox) { console.log("cgpt: textbox focused nahi tha, focus kar raha hoon"); try { await box.focus(); } catch {} }
       await page.keyboard.press("Enter");
       // Enter se message na gaya ho (user bubble nahi dikha) to send button dabao
       await page.waitForTimeout(1500);
