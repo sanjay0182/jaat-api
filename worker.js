@@ -585,20 +585,15 @@ async function handle(req, env) {
     if (!prompt) return Response.json({ error: { message: "prompt required", type: "invalid_request_error" } }, { status: 400 });
     const g = await gate(true); if (!g.ok) return deny(g);
     const t0 = Date.now();
-    // duck.ai image tool (runner me real Chrome). n = 1..4, parallel jobs. Fail hua to asli error; kuch bane to wahi lautate hain.
-    const n = Math.min(4, Math.max(1, parseInt(a.n, 10) || 1));
+    // duck.ai image tool (runner me real Chrome). Ek call = ek image.
     const jobBody = JSON.stringify({ provider: "duck-image", model: "image-generation", body: JSON.stringify({ prompt: prompt.slice(0, 4000), size: typeof a.size === "string" ? a.size.slice(0, 20) : "" }) });
-    const outs = await Promise.all(Array.from({ length: n }, async () => {
-      const r = await hub.fetch("https://hub/submit", { method: "POST", body: jobBody });
-      await hub.fetch("https://hub/record", { method: "POST", body: JSON.stringify({ id: g.id, model: "image-generation", provider: "duck-image", status: r.status, ms: Date.now() - t0 }) });
-      if (r.status !== 200) return { err: r };
-      let d; try { d = await r.json(); } catch { return { err: Response.json({ error: { message: "bad image response from runner", type: "error" } }, { status: 502 }) }; }
-      const item = d.b64_json ? { b64_json: d.b64_json, ...(a.response_format === "url" ? { url: "data:" + (d.mime || "image/png") + ";base64," + d.b64_json } : {}) } : d.url ? { url: d.url } : null;
-      return item ? { item } : { err: Response.json({ error: { message: "runner ne image nahi di", type: "error" } }, { status: 502 }) };
-    }));
-    const items = outs.filter((o) => o.item).map((o) => o.item);
-    if (!items.length) return outs[0].err;
-    return Response.json({ created: Math.floor(Date.now() / 1000), data: items });
+    const r = await hub.fetch("https://hub/submit", { method: "POST", body: jobBody });
+    await hub.fetch("https://hub/record", { method: "POST", body: JSON.stringify({ id: g.id, model: "image-generation", provider: "duck-image", status: r.status, ms: Date.now() - t0 }) });
+    if (r.status !== 200) return r;
+    let d; try { d = await r.json(); } catch { return Response.json({ error: { message: "bad image response from runner", type: "error" } }, { status: 502 }); }
+    const item = d.b64_json ? { b64_json: d.b64_json, ...(a.response_format === "url" ? { url: "data:" + (d.mime || "image/png") + ";base64," + d.b64_json } : {}) } : d.url ? { url: d.url } : null;
+    if (!item) return Response.json({ error: { message: "runner ne image nahi di", type: "error" } }, { status: 502 });
+    return Response.json({ created: Math.floor(Date.now() / 1000), data: [item] });
   }
 
   if (u.pathname === "/v1/chat/completions") {

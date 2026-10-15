@@ -111,6 +111,7 @@ J({model:"claude-sonnet",messages:[{role:"user",content:"Weather in Delhi?"}],to
 "   then run the tool yourself and send back the history + the assistant tool_calls message + a tool message:",
 J({role:"tool",tool_call_id:"CALL_ID_FROM_REPLY",content:"{\\"temp\\":31}"}),
 "   tool_choice: \\"auto\\" | \\"none\\" | \\"required\\" | {\\"type\\":\\"function\\",\\"function\\":{\\"name\\":\\"get_weather\\"}}",
+"   note (duck.ai models): agar tool_choice \\"required\\"/forced ho aur model ne <tool_call> ki jagah ek hi \\u0060\\u0060\\u0060bash\\u0060\\u0060\\u0060 code block diya (tool ka naam bash/shell jaisa ho), to wahi command tool call ban jati hai \\u2014 normal jawab ke example code se ye nahi hota.",
 "",
 "4) FASTER FOLLOW-UPS (session reuse, duck.ai models only): add \\"conversation_id\\":\\"my-chat-1\\" (or header x-conversation-id). Always send the FULL message history, unchanged, plus the new turn. If history changes it silently starts a fresh chat.",
 "",
