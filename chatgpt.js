@@ -274,30 +274,18 @@ export class CgptClient {
     if (net.status === 403) await this.fail(page, "403", "chatgpt.com ne request roki (Cloudflare/sentinel, shayad runner IP block). DUCK_HEADED=1 try karo", "challenge");
   }
 
-  // beech me popup/dialog: cookie / "stay logged out" hatao; limit = ratelimit;
-  // login dialog 8 sec tak band na ho to ratelimit (error me dialog ka text bhi)
+  // jawab aane tak page par KUCH CLICK NAHI hota. Dialog dikhe to sirf Escape + ek baar debug screenshot.
+  // Dialog "parda" hai, jawab uske peeche DOM me aata rehta hai, isliye dialog dekh ke haar nahi maante.
+  // Sirf saaf limit text ("reached", "too many"...) mile to ratelimit.
   async checkDialog(page, st) {
     const d = page.locator(SEL.dialog).first();
-    if (!(await d.count().catch(() => 0))) { st.seen = 0; return; }
+    if (!(await d.count().catch(() => 0))) return;
     const t = (await d.innerText().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 300);
     if (!t) return;
     if (/limit|too many|reached|come back|try again later/i.test(t) && !/cookie/i.test(t))
       await this.fail(page, "limit", "chatgpt.com guest limit: " + t.slice(0, 160), "ratelimit");
-    if (/clear current chat/i.test(t)) { // guest warning: sirf Escape. "Clear chat" / "Log in" kabhi mat dabao
-      try { await page.keyboard.press("Escape"); } catch {}
-      await closeOverlays(page);
-      if (!st.seen) st.seen = Date.now();
-      if (Date.now() - st.seen > 8000)
-        await this.fail(page, "clearchat", "chatgpt.com 'Clear current chat?' dialog band nahi hua | dialog: " + t.slice(0, 200), "ratelimit");
-      return;
-    }
-    await dismissPopups(page);
-    try { await page.locator('a:has-text("Stay logged out"), button:has-text("Stay logged out"), [role="dialog"] button[aria-label*="Close" i]').first().click({ timeout: 1500 }); } catch {}
-    if (/log ?in|sign ?up/i.test(t) && !/cookie/i.test(t)) {
-      if (!st.seen) st.seen = Date.now();
-      if (Date.now() - st.seen > 8000)
-        await this.fail(page, "loginwall", "chatgpt.com login dialog band nahi hua | dialog: " + t.slice(0, 200), "ratelimit");
-    }
+    if (!st.dlgText) { st.dlgText = t; console.log("cgpt: dialog dikha (click nahi kar rahe, Escape + intezaar):", t.slice(0, 160)); await this.debug(page, "dialog-seen"); }
+    try { await page.keyboard.press("Escape"); } catch {}
   }
 
   // messages (OpenAI style) -> OpenAI chat.completion JSON string
@@ -336,13 +324,13 @@ export class CgptClient {
       }
 
       // jawab aane tak ruko: DOM me text thehar jaye
-      const st = { seen: 0 };
+      const st = { dlgText: "" };
       let last = "", stable = 0, started = false, tick = 0;
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         await this.checkNet(net, page);
         if (!started || tick % 6 === 0) await this.checkDialog(page, st);
-        if (tick++ % 6 === 3) { const r = await closeOverlays(page); if (r) console.log("cgpt: popup band:", r); }
+        tick++;
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
         const txt = n ? (await els.nth(n - 1).innerText().catch(() => "")).trim() : "";
@@ -355,6 +343,7 @@ export class CgptClient {
       }
       await this.debug(page, started ? "partial" : "timeout");
       if (last) { await this.guard(last, page); return completion(model || DEFAULT_MODEL, last); } // adhura hi sahi
+      if (st.dlgText) await this.fail(page, "dialog-timeout", "chatgpt.com jawab nahi aaya, dialog atka raha | dialog: " + st.dlgText.slice(0, 200), "ratelimit");
       throw new CgptError("chatgpt.com timeout", "timeout");
     } finally {
       try { await h?.page?.close(); } catch {}
