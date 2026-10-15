@@ -316,6 +316,24 @@ function withToolInstruction(messages, tools, toolChoice) {
   return out;
 }
 
+// tool_choice required/forced ho aur model ne <tool_call> ki jagah ek hi ```bash``` block diya ho to wahi command bash-type tool ka argument banao.
+// Sirf "required" par chalta hai (normal jawab ke example code block kabhi command nahi bante). Shak ho to null.
+function synthFromCodeBlock(text, tools, toolChoice) {
+  const schemas = toolSchemas(tools);
+  const BASH = /^(bash|shell|sh|terminal|run_command|execute_command|exec|run_shell_command|command)$/i;
+  const tool = schemas.find((t) => BASH.test(t.name));
+  const fn = forcedName(toolChoice);
+  if (!tool || (fn && fn !== tool.name)) return null;
+  const props = (tool.parameters && tool.parameters.properties) || {};
+  const req = (tool.parameters && tool.parameters.required) || [];
+  const isStr = (k) => props[k] && props[k].type === "string";
+  const param = req.find(isStr) || Object.keys(props).find(isStr);
+  if (!param || req.some((k) => k !== param)) return null; // doosre required arguments hon to hum bhar nahi sakte
+  const blocks = [...String(text).matchAll(/```(?:bash|sh|shell|console|zsh)?[ \t]*\r?\n([\s\S]*?)```/gi)].map((m) => m[1].trim()).filter(Boolean);
+  if (blocks.length !== 1) return null; // zero ya ek se zyada block: andaza nahi lagate
+  return [{ id: "call_" + Math.random().toString(36).slice(2, 12), type: "function", function: { name: tool.name, arguments: JSON.stringify({ [param]: blocks[0] }) } }];
+}
+
 function parseToolReply(text, tools, toolChoice) {
   const schemas = toolSchemas(tools);
   if (!schemas.length || toolChoice === "none") return null;
@@ -473,6 +491,10 @@ export class DuckClient {
           const c2 = parseToolReply(t2, tools, tool_choice);
           if (c2) { toolCalls = c2; text = t2; }
         } catch (e) { console.log("duck: tool retry fail:", e.message); }
+      }
+      if (!toolCalls && must && toolSchemas(tools).length) {
+        const sy = synthFromCodeBlock(text, tools, tool_choice);
+        if (sy) { toolCalls = sy; console.log("duck: required tool_call nahi aaya, code block se bash call banaya"); }
       }
       if (key && store && page && !page.isClosed()) {
         const sc = [...canons, canon(toolCalls ? { role: "assistant", content: null, tool_calls: toolCalls } : { role: "assistant", content: text })];
