@@ -2,6 +2,7 @@
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
 import { DuckClient } from "./duck.js";
 import { PplxClient } from "./perplexity.js";
+import { VeniceClient } from "./venice.js";
 import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
 import { callFree } from "./free-call.mjs";
 
@@ -26,6 +27,9 @@ const DUCK_IMAGE_TIMEOUT_MS = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000
 // perplexity.ai provider (real Chrome, basic chat). Chrome pehli pplx request par hi khulta hai.
 const pplx = new PplxClient();
 const PPLX_TIMEOUT_MS = Number(process.env.PPLX_TIMEOUT_MS || 130000);
+// venice.ai provider (DeepSeek V4, real Chrome, basic chat)
+const venice = new VeniceClient();
+const VENICE_TIMEOUT_MS = Number(process.env.VENICE_TIMEOUT_MS || 130000);
 
 const start = Date.now();
 duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
@@ -139,6 +143,9 @@ async function handle({ id, provider, name, body, stream }) {
     } else if (provider === "duck-image") {
       const j = JSON.parse(body);
       data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS, j.size); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
+    } else if (provider === "venice") {
+      const j = JSON.parse(body);
+      data = await venice.chat({ model: j.model, messages: j.messages }, VENICE_TIMEOUT_MS);
     } else if (provider === "perplexity") {
       const j = JSON.parse(body);
       data = await pplx.chat({ model: j.model, messages: j.messages }, PPLX_TIMEOUT_MS);
@@ -187,4 +194,5 @@ while (inflight > 0) await sleep(200);
 clearInterval(modelRefresh);
 await duck.close();
 await pplx.close();
+await venice.close();
 process.exit(0);

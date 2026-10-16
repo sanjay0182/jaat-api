@@ -29,6 +29,8 @@ const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUC
 
 // perplexity.ai provider (real Chrome, basic chat, no tools/streaming/session-reuse)
 const PPLX_MODELS = ["pplx-auto", "perplexity"];
+// venice.ai provider (DeepSeek V4, real Chrome, basic chat)
+const isVeniceModel = (m) => typeof m === "string" && (m === "venice" || m.startsWith("venice-"));
 const isPplxModel = (m) => typeof m === "string" && (m.startsWith("pplx") || PPLX_MODELS.includes(m));
 // legacy functions/function_call -> tools/tool_choice (sirf duck ke liye; free providers ko body untouched)
 function normalizeLegacy(j) {
@@ -153,16 +155,17 @@ export class Hub {
       this.lastRequest = Date.now();
       await this.state.storage.put("lastRequest", this.lastRequest);
 
-      const provider = job.provider === "duck-image" ? "duck-image" : job.provider === "duck" ? "duck" : job.provider === "perplexity" ? "perplexity" : job.provider === "free" ? "free" : "jaat";
+      const provider = job.provider === "duck-image" ? "duck-image" : job.provider === "duck" ? "duck" : job.provider === "perplexity" ? "perplexity" : job.provider === "venice" ? "venice" : job.provider === "free" ? "free" : "jaat";
       const name = job.name; // free provider ka naam
       const model = String(job.model || "");
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
       const pplxWait = Number(this.env.PPLX_WAIT_MS || 140000);
+      const veniceWait = Number(this.env.VENICE_WAIT_MS || 140000);
       const fp = provider === "free" ? FREE_PROVIDERS.find((x) => x.name === name) : null;
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
-      const label = provider === "free" ? name : provider === "duck" ? model : provider === "duck-image" ? "duck-image" : provider === "perplexity" ? model : "vireonix";
+      const label = provider === "free" ? name : provider === "duck" ? model : provider === "duck-image" ? "duck-image" : provider === "perplexity" || provider === "venice" ? model : "vireonix";
 
-      const wait = provider === "duck-image" ? Number(this.env.DUCK_IMAGE_WAIT_MS || 240000) : provider === "duck" ? duckWait : provider === "perplexity" ? pplxWait : provider === "free" ? freeWait : 180000;
+      const wait = provider === "duck-image" ? Number(this.env.DUCK_IMAGE_WAIT_MS || 240000) : provider === "duck" ? duckWait : provider === "perplexity" ? pplxWait : provider === "venice" ? veniceWait : provider === "free" ? freeWait : 180000;
 
       // real streaming: sirf duck + stream=true. Pehla chunk aane tak normal (JSON error / fake-stream fallback) rasta
       if (provider === "duck" && job.stream === true) {
@@ -560,6 +563,7 @@ async function handle(req, env) {
         { id: "jaat-default", object: "model", created: 0, owned_by: "jaat" },
         ...[...new Set([...DUCK_MODELS, ...liveModels.map(x => typeof x === "string" ? x : x.id).filter(Boolean)])].map(id => ({ ...(liveById.get(id) || {}), id, object: "model", created: 0, owned_by: "duck.ai" })),
         { id: "pplx-auto", object: "model", created: 0, owned_by: "perplexity.ai" },
+        { id: "venice", object: "model", created: 0, owned_by: "venice.ai" },
         ...FREE_PROVIDERS.map(p => ({ id: p.name, object: "model", created: 0, owned_by: new URL(p.base).hostname })),
       ],
     });
@@ -616,7 +620,8 @@ async function handle(req, env) {
     const free = isFreeModel(j.model); // free provider ka exact naam sabse pehle
     const duck = !free && (isDuckModel(j.model) || (catalog.models || []).some(x => (typeof x === "string" ? x : x.id) === j.model));
     const pplx = !free && !duck && isPplxModel(j.model);
-    const shownModel = duck || free || pplx ? j.model : "jaat-default";
+    const venice = !free && !duck && !pplx && isVeniceModel(j.model);
+    const shownModel = duck || free || pplx || venice ? j.model : "jaat-default";
     const inputStream = j.stream === true; delete j.stream_options;
 
     // jaat (vireonix) wali body: model "auto" + cache todne ke liye random note
@@ -635,6 +640,8 @@ async function handle(req, env) {
       ? { provider: "free", name: j.model, body: JSON.stringify({ ...j, stream: false, messages: j.messages || [] }) }
       : pplx
       ? { provider: "perplexity", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
+      : venice
+      ? { provider: "venice", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
