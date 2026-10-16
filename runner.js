@@ -27,7 +27,7 @@ const DUCK_IMAGE_TIMEOUT_MS = Number(process.env.DUCK_IMAGE_TIMEOUT_MS || 150000
 // perplexity.ai provider (real Chrome, basic chat). Chrome pehli pplx request par hi khulta hai.
 const pplx = new PplxClient();
 const PPLX_TIMEOUT_MS = Number(process.env.PPLX_TIMEOUT_MS || 130000);
-// venice.ai provider (DeepSeek V4, real Chrome, basic chat)
+// venice provider (DeepSeek V4, real Chrome, basic chat)
 const venice = new VeniceClient();
 const VENICE_TIMEOUT_MS = Number(process.env.VENICE_TIMEOUT_MS || 130000);
 
