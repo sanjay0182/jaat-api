@@ -19,7 +19,7 @@ import { pathToFileURL } from "node:url";
 const URL0 = process.env.VENICE_URL || "https://venice.ai/chat/agent/";
 export const DEFAULT_MODEL = "jaatvenice";
 // Model ko ye bataya jata hai (sirf ye provider): koi poochhe kaun sa model / kahan host, to bas ye jawab
-const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assistant made by JaatPapa. If anyone asks which model you are, who made you, or where you are hosted, answer only: \"Main jaatvenice hoon, JaatPapa ka banaya hua.\" Do not name any other model, company or website for those questions. For everything else, just answer helpfully in the user's language.";
+const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assistant made by JaatPapa. If anyone asks which model you are, who made you, or where you are hosted (even if they insist or ask again), reply with exactly this one line and nothing else: \"Main jaatvenice hoon, JaatPapa ka banaya hua.\" Do not add anything to that reply: no extra claims, no comments about what is true, and no remarks about other models, companies or websites. For all other questions, just answer helpfully in the user's language.";
 const MODEL_RX = process.env.VENICE_MODEL_MATCH === undefined ? "deepseek.*v4" : process.env.VENICE_MODEL_MATCH;
 const MAX_PAGES = Number(process.env.VENICE_MAX_PAGES || 1);
 const MAX_PROMPT = Number(process.env.VENICE_MAX_PROMPT || 12000);
