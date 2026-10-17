@@ -17,7 +17,9 @@ import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const URL0 = process.env.VENICE_URL || "https://venice.ai/chat/agent/";
-export const DEFAULT_MODEL = "venice";
+export const DEFAULT_MODEL = "jaatvenice";
+// Model ko ye bataya jata hai (sirf ye provider): koi poochhe kaun sa model / kahan host, to bas ye jawab
+const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assistant made by JaatPapa. If anyone asks which model you are, who made you, or where you are hosted, answer only: \"Main jaatvenice hoon, JaatPapa ka banaya hua.\" Do not name any other model, company or website for those questions. For everything else, just answer helpfully in the user's language.";
 const MODEL_RX = process.env.VENICE_MODEL_MATCH === undefined ? "deepseek.*v4" : process.env.VENICE_MODEL_MATCH;
 const MAX_PAGES = Number(process.env.VENICE_MAX_PAGES || 1);
 const MAX_PROMPT = Number(process.env.VENICE_MAX_PROMPT || 12000);
@@ -68,7 +70,8 @@ export function flatten(messages) {
     const role = m.role === "assistant" ? "Assistant" : m.role === "system" || m.role === "developer" ? "System" : "Human";
     parts.push({ role, t });
   }
-  if (parts.length === 1 && parts[0].role === "Human") return parts[0].t;
+  if (parts.length === 1 && parts[0].role === "Human") return PERSONA ? PERSONA + "\n\nUser message: " + parts[0].t : parts[0].t;
+  if (PERSONA) parts.unshift({ role: "System", t: PERSONA });
   return (
     "Below is a conversation transcript. Reply ONLY as the Assistant to the last Human message. " +
     "Do not repeat the transcript or write role labels.\n\n" +
@@ -168,9 +171,9 @@ function cleanAnswer(t) {
     }
     out.push(l);
   }
-  // jawab me "Venice.ai" likha ho to "Venice" kar do (link/URL ko mat chhedo)
+  // jawab me "Venice" / "Venice.ai" likha ho to "jaatvenice" kar do (link/URL ko mat chhedo)
   const res = out.join("\n").replace(/\n{3,}/g, "\n\n").trim()
-    .replace(/(?<![\/\w.@-])venice\.ai(?![\w\/-])/gi, (m) => (m[0] === "V" ? "Venice" : "venice"));
+    .replace(/(?<![\/\w.@-])venice(?:\.ai)?(?![\w\/-])/gi, (m) => (m[0] === "V" ? "Jaatvenice" : "jaatvenice"));
   return res || String(t || "").trim(); // sab hat gaya to original
 }
 
@@ -229,7 +232,7 @@ export class VeniceClient {
     console.log("venice: login wall / limit:", String(text).trim().slice(0, 120));
     await this.debug(page, "wall");
     try { await this.ctx.clearCookies(); } catch {}
-    throw new VeniceError("venice guest limit / login maang raha hai. Thodi der baad try karo", "ratelimit");
+    throw new VeniceError("jaatvenice guest limit / login maang raha hai. Thodi der baad try karo", "ratelimit");
   }
 
   async chat({ model, messages }, timeoutMs = 130000) {
@@ -256,9 +259,9 @@ export class VeniceClient {
           console.log("venice no-input:", info);
           await this.debug(page, "no-input");
           if (/verify you are human|just a moment|captcha|security verification|checking your browser/i.test(info))
-            throw new VeniceError("venice bot check (DUCK_HEADED=1 try karo) | " + info.slice(0, 380), "challenge");
-          if (/sign up|log in|sign in|create account/i.test(info)) throw new VeniceError("venice login maang raha hai | " + info.slice(0, 380), "ratelimit");
-          throw new VeniceError("venice input box nahi mila | " + info.slice(0, 380), "error");
+            throw new VeniceError("jaatvenice bot check (DUCK_HEADED=1 try karo) | " + info.slice(0, 380), "challenge");
+          if (/sign up|log in|sign in|create account/i.test(info)) throw new VeniceError("jaatvenice login maang raha hai | " + info.slice(0, 380), "ratelimit");
+          throw new VeniceError("jaatvenice input box nahi mila | " + info.slice(0, 380), "error");
         }
       }
 
@@ -282,13 +285,13 @@ export class VeniceClient {
         if (txt) { started = true; via = r.via; }
         const generating = (await page.locator(SEL.stop).count().catch(() => 0)) > 0;
         if (txt && txt === last && !generating) {
-          if (++stable >= 6) { console.log("venice: jawab via", via); await this.guard(txt, page); return completion(model || DEFAULT_MODEL, cleanAnswer(txt)); }
+          if (++stable >= 6) { console.log("venice: jawab via", via); await this.guard(txt, page); return completion(DEFAULT_MODEL, cleanAnswer(txt)); }
         } else stable = 0;
         last = txt;
       }
       await this.debug(page, started ? "partial" : "timeout");
-      if (last) { await this.guard(last, page); return completion(model || DEFAULT_MODEL, cleanAnswer(last)); } // adhura hi sahi
-      throw new VeniceError("venice timeout (jawab nahi mila) | " + (await pageInfo(page)).slice(0, 300), "timeout");
+      if (last) { await this.guard(last, page); return completion(DEFAULT_MODEL, cleanAnswer(last)); } // adhura hi sahi
+      throw new VeniceError("jaatvenice timeout (jawab nahi mila) | " + (await pageInfo(page)).slice(0, 300), "timeout");
     } finally {
       try { await page?.close(); } catch {}
       this.free();

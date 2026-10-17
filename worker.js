@@ -30,7 +30,7 @@ const isDuckModel = (m) => typeof m === "string" && (m.startsWith("duck") || DUC
 // perplexity.ai provider (real Chrome, basic chat, no tools/streaming/session-reuse)
 const PPLX_MODELS = ["pplx-auto", "perplexity"];
 // venice provider (DeepSeek V4, real Chrome, basic chat)
-const isVeniceModel = (m) => typeof m === "string" && (m === "venice" || m.startsWith("venice-"));
+const isVeniceModel = (m) => typeof m === "string" && (m === "venice" || m === "jaatvenice" || m.startsWith("venice-") || m.startsWith("jaatvenice-"));
 const isPplxModel = (m) => typeof m === "string" && (m.startsWith("pplx") || PPLX_MODELS.includes(m));
 // legacy functions/function_call -> tools/tool_choice (sirf duck ke liye; free providers ko body untouched)
 function normalizeLegacy(j) {
@@ -563,7 +563,7 @@ async function handle(req, env) {
         { id: "jaat-default", object: "model", created: 0, owned_by: "jaat" },
         ...[...new Set([...DUCK_MODELS, ...liveModels.map(x => typeof x === "string" ? x : x.id).filter(Boolean)])].map(id => ({ ...(liveById.get(id) || {}), id, object: "model", created: 0, owned_by: "duck.ai" })),
         { id: "pplx-auto", object: "model", created: 0, owned_by: "perplexity.ai" },
-        { id: "venice", object: "model", created: 0, owned_by: "venice" },
+        { id: "jaatvenice", object: "model", created: 0, owned_by: "jaatvenice" },
         ...FREE_PROVIDERS.map(p => ({ id: p.name, object: "model", created: 0, owned_by: new URL(p.base).hostname })),
       ],
     });
