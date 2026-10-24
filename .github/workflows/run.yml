@@ -18,6 +18,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # repo Variable (Settings -> Variables): DUCK_HEADED=1 ho to chrome xvfb me headed chalega
           DUCK_HEADED: ${{ vars.DUCK_HEADED }}
+          # agla runner 90s par start (pehle 120s): naye runner ko 3+3+3 pages tayyar karne ka time mile, overlap lamba
+          NEXT_AT_MS: 90000
+          # naya runner 15s me apne 3+3+3 pages tayyar kare, tab hi requests le
+          WARM_WAIT_MS: 15000
           # Private provider keys only GitHub Secrets se aayengi; source me koi live key nahi rakhi.
           REV_KEY: ${{ secrets.REV_KEY }}
           REV_GROK_KEY: ${{ secrets.REV_GROK_KEY }}
