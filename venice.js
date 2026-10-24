@@ -15,6 +15,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
+import { WarmPool } from "./warmpool.js";
 
 const URL0 = process.env.VENICE_URL || "https://venice.ai/chat/agent/";
 export const DEFAULT_MODEL = "jaatvenice";
@@ -23,6 +24,9 @@ const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assista
 const MODEL_RX = process.env.VENICE_MODEL_MATCH === undefined ? "deepseek.*v4" : process.env.VENICE_MODEL_MATCH;
 const MAX_PAGES = Number(process.env.VENICE_MAX_PAGES || 1);
 const MAX_PROMPT = Number(process.env.VENICE_MAX_PROMPT || 12000);
+const WARM_POOL = Number(process.env.VENICE_WARM_POOL || 3);              // kitne page pehle se khule rakhne hain
+const WARM_TTL_MS = Number(process.env.VENICE_WARM_TTL_MS || 150000);     // tayyar page itni der baad purana maano
+const WARM_ON = process.env.VENICE_WARM !== "0" && WARM_POOL > 0;         // VENICE_WARM=0 => band
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
 // page ke selectors - venice badle / galat nikle to sirf yahan theek karo
@@ -219,6 +223,7 @@ export class VeniceClient {
   constructor() {
     this.browser = null; this.ctx = null; this.starting = null;
     this.active = 0; this.waiters = [];
+    this.pool = new WarmPool({ size: WARM_POOL, ttlMs: WARM_TTL_MS, label: "venice", open: async () => { await this.ensure(); return this._prepare(); } });
   }
 
   async ensure() {
@@ -259,30 +264,14 @@ export class VeniceClient {
     console.log("venice: login wall / limit:", String(text).trim().slice(0, 120));
     await this.debug(page, "wall");
     try { await this.ctx.clearCookies(); } catch {}
+    this.pool.flush(); // purani session wale warm pages hatao
     throw new VeniceError("jaatvenice guest limit / login maang raha hai. Thodi der baad try karo", "ratelimit");
   }
 
-  async chat({ model, messages, files, onProgress, shouldStop }, timeoutMs = 240000) {
-    const att = (files || []).map((f) => ({ name: f.name || "file", mimeType: f.mime || "application/octet-stream", buffer: Buffer.from(String(f.b64 || ""), "base64") }));
-    if (att.length && !(messages || []).some((m) => m && m.role === "user" && textOf(m.content).trim()))
-      messages = [...(messages || []), { role: "user", content: "Look at the attached file(s) and tell me what is in them." }];
-    let prompt = flatten(messages).slice(-MAX_PROMPT);
-    if (!prompt.trim()) throw new VeniceError("empty prompt", "bad_request");
-    await this.ensure();
-    await this.slot();
-    const t0 = Date.now();
-    const deadline = t0 + timeoutMs;
-    let lastGen = 0;
-    // live progress: console + (runner ke through) worker ko, taaki API se dekh sako venice kya kar raha hai
-    const prog = (stage, extra = {}) => {
-      const ms = Date.now() - t0;
-      console.log(`venice [${Math.round(ms / 1000)}s]: ${stage}` + (extra.detail ? " | " + extra.detail : "") + (extra.chars != null ? ` | ${extra.chars} chars` : ""));
-      try { onProgress && onProgress({ stage, ms, ...extra }); } catch {}
-    };
-    let page;
+  // ---- PEHLE SE TAYYAR PAGE: goto + challenge + input + model sab pehle ho chuka hota hai ----
+  async _prepare(prog = () => {}) {
+    const page = await this.ctx.newPage();
     try {
-      prog("start");
-      page = await this.ctx.newPage();
       await page.goto(URL0, { waitUntil: "domcontentloaded", timeout: 25000 });
       prog("page-opened");
       await page.waitForTimeout(1500);
@@ -305,11 +294,43 @@ export class VeniceClient {
           throw new VeniceError("jaatvenice input box nahi mila | " + info.slice(0, 380), "error");
         }
       }
-
       prog("input-ready");
       const pm = await pickModel(page);
       prog("model", { detail: pm });
       await dismissPopups(page);
+      return { page, box, pm };
+    } catch (e) { try { await page.close(); } catch {} throw e; }
+  }
+
+  // runner start par: chrome + WARM_POOL pages pehle se tayyar (background)
+  warmUp() { if (WARM_ON) this.pool.start(); }
+  warmReady(ms) { return WARM_ON ? this.pool.settled(ms) : Promise.resolve(); }
+
+  async chat({ model, messages, files, onProgress, shouldStop }, timeoutMs = 240000) {
+    const att = (files || []).map((f) => ({ name: f.name || "file", mimeType: f.mime || "application/octet-stream", buffer: Buffer.from(String(f.b64 || ""), "base64") }));
+    if (att.length && !(messages || []).some((m) => m && m.role === "user" && textOf(m.content).trim()))
+      messages = [...(messages || []), { role: "user", content: "Look at the attached file(s) and tell me what is in them." }];
+    let prompt = flatten(messages).slice(-MAX_PROMPT);
+    if (!prompt.trim()) throw new VeniceError("empty prompt", "bad_request");
+    await this.ensure();
+    await this.slot();
+    const t0 = Date.now();
+    const deadline = t0 + timeoutMs;
+    let lastGen = 0;
+    // live progress: console + (runner ke through) worker ko, taaki API se dekh sako venice kya kar raha hai
+    const prog = (stage, extra = {}) => {
+      const ms = Date.now() - t0;
+      console.log(`venice [${Math.round(ms / 1000)}s]: ${stage}` + (extra.detail ? " | " + extra.detail : "") + (extra.chars != null ? ` | ${extra.chars} chars` : ""));
+      try { onProgress && onProgress({ stage, ms, ...extra }); } catch {}
+    };
+    let page;
+    try {
+      prog("start");
+      let w = WARM_ON ? await this.pool.take() : null;
+      if (w) { prog("page-opened", { detail: "warm" }); prog("input-ready"); prog("model", { detail: w.pm }); }
+      else w = await this._prepare(prog);
+      page = w.page;
+      const box = w.box;
 
       if (att.length) {
         const mb = att.reduce((a, f) => a + f.buffer.length, 0) / 1048576;
@@ -371,7 +392,7 @@ export class VeniceClient {
     }
   }
 
-  async close() { try { await this.browser?.close(); } catch {} this.browser = null; this.ctx = null; this.starting = null; }
+  async close() { try { await this.pool.closeAll(); } catch {} try { await this.browser?.close(); } catch {} this.browser = null; this.ctx = null; this.starting = null; }
 }
 
 // ---- akele chalao: node venice.js "prompt" --------------------------------------

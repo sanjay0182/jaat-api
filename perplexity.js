@@ -15,12 +15,15 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
+import { WarmPool } from "./warmpool.js";
 
 const BASE = process.env.PPLX_BASE || "https://www.perplexity.ai";
 export const DEFAULT_MODEL = "pplx-auto";
 const MAX_PAGES = Number(process.env.PPLX_MAX_PAGES || 2); // ek saath kitne chat
 const MAX_PROMPT = Number(process.env.PPLX_MAX_PROMPT || 12000);
 const WARM_MAX_MS = Number(process.env.PPLX_WARM_MAX_MS || 120000); // garam page ki umar
+const WARM_POOL = Number(process.env.PPLX_WARM_POOL || 3);          // kitne page pehle se khule rakhne hain
+const WARM_ON = process.env.PPLX_WARM !== "0" && WARM_POOL > 0;     // PPLX_WARM=0 => band
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
 
 // page ke selectors - perplexity badle to sirf yahan theek karo
@@ -201,7 +204,7 @@ export class PplxClient {
   constructor() {
     this.browser = null; this.ctx = null; this.starting = null;
     this.active = 0; this.waiters = [];
-    this.warm = null; // pehle se tayyar page (promise)
+    this.pool = new WarmPool({ size: WARM_POOL, ttlMs: WARM_MAX_MS, label: "pplx", open: async () => { await this.ensure(); return this.open(45000); } });
   }
 
   async ensure() {
@@ -263,12 +266,6 @@ export class PplxClient {
     } catch (e) { try { await page.close(); } catch {} throw e; }
   }
 
-  // agli request ke liye ek page pehle se garam rakho (background me)
-  prewarm() {
-    if (this.warm || !this.ctx) return;
-    this.warm = this.open(45000).catch((e) => { console.log("pplx prewarm fail:", e.message.slice(0, 120)); return null; });
-  }
-
   // messages (OpenAI style) -> OpenAI chat.completion JSON string
   async chat({ model, messages }, timeoutMs = 100000) {
     const prompt = flatten(messages).slice(-MAX_PROMPT);
@@ -278,11 +275,10 @@ export class PplxClient {
     const deadline = Date.now() + timeoutMs;
     let h = null;
     try {
-      // garam page ho (aur 2 min se purana na ho) to wahi, warna naya
-      if (this.warm) { const w = await this.warm; this.warm = null; if (w && Date.now() - w.t < WARM_MAX_MS) h = w; else if (w) { try { await w.page.close(); } catch {} } }
+      // pool me tayyar page ho to wahi (pool khud naya bharta hai), warna naya kholo
+      if (WARM_ON) h = await this.pool.take();
       if (!h) h = await this.open(Math.min(60000, timeoutMs));
       const { page, box } = h;
-      this.prewarm(); // agli request ke liye abhi se tayyari (is page se alag)
 
       let sse = "";
       page.on("response", async (r) => {
@@ -324,14 +320,16 @@ export class PplxClient {
     console.log("pplx: guest limit / login wall:", String(text).trim().slice(0, 120));
     await this.debug(page, "wall");
     try { await this.ctx.clearCookies(); } catch {} // naya anonymous session agli baar
-    try { const w = this.warm ? await this.warm : null; this.warm = null; await w?.page?.close(); } catch {}
+    this.pool.flush(); // purani session wale warm pages hatao
     throw new PplxError("perplexity.ai guest limit (login/sign up maang raha hai). Thodi der baad try karo", "ratelimit");
   }
 
-  async warmup() { try { await this.ensure(); } catch (e) { console.log("pplx warmup fail:", e.message); } }
+  warmReady(ms) { return WARM_ON ? this.pool.settled(ms) : Promise.resolve(); }
+
+  async warmup() { try { await this.ensure(); if (WARM_ON) this.pool.start(); } catch (e) { console.log("pplx warmup fail:", e.message); } }
 
   async close() {
-    try { const w = this.warm ? await this.warm : null; this.warm = null; await w?.page?.close(); } catch {}
+    try { await this.pool.closeAll(); } catch {}
     try { await this.browser?.close(); } catch {}
     this.browser = null; this.ctx = null; this.starting = null;
   }

@@ -605,6 +605,12 @@ export class DuckClient {
     try { await this.ensure(); this.#refill(); } catch (e) { console.log("duck warmup fail:", e.message); }
   }
 
+  // pool bharne ki pehli koshish poori hone tak ruko (max ms)
+  async warmReady(ms = 20000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end && (!this.ctx || this.refilling > 0)) await new Promise((r) => setTimeout(r, 200));
+  }
+
   // Warm pages ke network response se pakda catalog (max waitMs ruk ke). Na mile to [] -> hardcoded fallback chalta rahega.
   // Debug: DUCK_LOG_MODELS=1 se "models" wale saare duck.ai URLs log hote hain.
   async discoverModels(waitMs = 12000) {

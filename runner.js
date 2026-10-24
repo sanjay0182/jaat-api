@@ -32,7 +32,9 @@ const venice = new VeniceClient();
 const VENICE_TIMEOUT_MS = Number(process.env.VENICE_TIMEOUT_MS || 240000);
 
 const start = Date.now();
-duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
+duck.warmup();  // duck: 3 page pehle se (DUCK_WARM_POOL)
+pplx.warmup();  // perplexity: 3 page pehle se (PPLX_WARM_POOL)
+venice.warmUp(); // venice: 3 page pehle se (VENICE_WARM_POOL) // chrome + duck.ai page pehle se tayyar (background)
 // duck.ai ka asli model catalog (page ke network response se) worker ko bhejo. Na mile to hardcoded fallback chalta hai.
 // Runner har ~3 min rotate hota hai, isliye har run me ek baar (start ke baad) publish; lamba run ho to 10 min me dobara.
 async function publishDuckModels() {
@@ -193,6 +195,12 @@ async function handle({ id, provider, name, body, stream }) {
     });
   } catch {}
 }
+
+// Naya runner pehle apne 3+3+3 pages tayyar kare (max WARM_WAIT_MS = 15s), tab requests le.
+// Is beech purana runner (jo abhi chal raha hai) requests sambhalta hai, isliye handover me koi cold page nahi.
+const WARM_WAIT_MS = Number(process.env.WARM_WAIT_MS || 15000);
+await Promise.all([duck.warmReady(WARM_WAIT_MS), pplx.warmReady(WARM_WAIT_MS), venice.warmReady(WARM_WAIT_MS)]).catch(() => {});
+console.log("runner: pages tayyar, requests lena shuru (", Date.now() - start, "ms )");
 
 while (true) {
   const el = Date.now() - start;
