@@ -28,6 +28,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}td,th{text-align:left;p
 <div class="top"><h1>Jaat API</h1><div><button onclick="load()">Refresh</button> <button onclick="logout()">Logout</button></div></div>
 <div class="grid" id="st"></div>
 <div class="card"><h2>Last 24 hours</h2><div class="ch" id="ch"></div><div class="row m"><span>24h pehle</span><span>abhi</span></div></div>
+<div class="card"><div class="row"><h2 style="margin:0">Venice Live</h2><span><label style="display:inline;margin:0"><input type="checkbox" id="vl" checked style="width:auto"> auto (2s)</label> <button onclick="vs()">Refresh</button></span></div><div id="vv" class="m" style="margin-top:8px">Abhi koi Venice job nahi</div></div>
 <div class="card"><div class="row"><h2 style="margin:0">API Keys</h2><button class="p" onclick="op()">+ New key</button></div><div id="ks"></div></div>
 <div class="card"><h2>Models (total requests)</h2><div class="sc"><table id="mt"></table></div></div>
 <div class="card"><div class="row"><h2 style="margin:0">AI ke liye guide</h2><button class="p" onclick="cp()">Copy</button></div><p class="m">Ye poora text kisi bhi AI ko paste kar do, use project bhejne ki zaroorat nahi: wo samajh jayega kaunsa model, kahan aur kaisi JSON request bhejni hai.</p><textarea id="gd" readonly rows="16" style="width:100%;font:12px/1.4 ui-monospace,Menlo,monospace;border:1px solid var(--b);border-radius:8px;padding:8px"></textarea></div>
@@ -49,7 +50,7 @@ function login(){T=$("pw").value.trim();localStorage.setItem("ak",T);load()}
 function logout(){localStorage.removeItem("ak");T="";$("app").hidden=true;$("lg").hidden=false}
 function ago(t){if(!t)return"kabhi nahi";var s=(Date.now()-t)/1e3;return s<60?Math.floor(s)+"s pehle":s<3600?Math.floor(s/60)+"m pehle":s<86400?Math.floor(s/3600)+"h pehle":Math.floor(s/86400)+"d pehle"}
 function lf(k){if(!k.expiresAt)return"hamesha";var d=k.expiresAt-Date.now();return d<=0?"expire ho gayi":d<864e5?Math.ceil(d/36e5)+" ghante bache":Math.ceil(d/864e5)+" din bache"}
-async function load(){if(!T)return;try{D=await api("list")}catch(e){return}$("lg").hidden=true;$("app").hidden=false;draw();if(!window.GD){window.GD=1;guide()}}
+async function load(){if(!T)return;try{D=await api("list")}catch(e){return}$("lg").hidden=true;$("app").hidden=false;draw();vs();if(!window.GD){window.GD=1;guide()}}
 function draw(){var K=D.keys,td=0,tt=0,er=0,M={};
 K.forEach(function(k){td+=k.today;tt+=k.total;er+=k.err||0;for(var m in k.models)M[m]=(M[m]||0)+k.models[m]});
 var act=K.filter(function(k){return!k.disabled&&!(k.expiresAt&&k.expiresAt<Date.now())}).length;
@@ -125,14 +126,23 @@ J({model:"claude-sonnet",max_tokens:1024,system:"You are helpful.",messages:[{ro
 J({model:"gpt-4o",instructions:"You are helpful.",input:"Hello"}),
 "   reply: output_text. input can also be a list of items incl. function_call / function_call_output.",
 "",
+"7) JAATVENICE EXTRAS (only model jaatvenice, POST /v1/chat/completions)",
+"   venice_status:true  -> reply gets jaat_status {log:[{stage,ms}...], ms} (stages: start, page-opened, input-ready, model, uploading, prompt-sent, generating, done). false/missing = nothing extra. Live view: dashboard 'Venice Live' or GET /v1/venice/status",
+"   files: put parts inside the user message content list: {type:'text',text:'...'}, {type:'image_url',image_url:{url:'data:image/png;base64,...'}}, {type:'file',file:{filename:'a.pdf',file_data:'data:application/pdf;base64,...'}}. Text with files, or files alone, both work.",
+"   file limits: max 10MB total for all files (413 if more), max 10 files, zip/rar/7z/tar/gz and video are rejected (400), only base64 / data: URL (no http links). Upload depends on venice page; if it cannot upload, an error says so (text-type files then go inline in the prompt).",
+"",
 "OPTIONAL FIELDS: reasoning_effort (low|medium|high), max_tokens, temperature.",
 "ERRORS: JSON  {\\"error\\":{\\"message\\":...,\\"type\\":...}}; 401 bad key, 429 rate/day limit of that key, 5xx upstream/duck.ai problem (just retry).",
-"NOTES: jaatvenice and perplexity.ai models (pplx-*) are plain chat only - tools / conversation_id are ignored and the full reply arrives at once; allow up to ~110s. A request can take 3-20s (real browser behind it). Use a timeout of at least 90s. Streaming is real only for duck.ai models without tools; otherwise chunks arrive at the end."
+"NOTES: jaatvenice and perplexity.ai models (pplx-*) are plain chat only - tools / conversation_id are ignored and the full reply arrives at once; jaatvenice can take up to ~240s (use a 260s client timeout). A request can take 3-20s (real browser behind it). Use a timeout of at least 90s. Streaming is real only for duck.ai models without tools; otherwise chunks arrive at the end."
 ];
 $("gd").value=L.join("\\n")}
 function cp(){var t=$("gd");t.select();t.setSelectionRange(0,99999);try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand("copy")}}
 async function tg(i,v){await api("update",{id:i,disabled:v});load()}
 async function rs(i){if(confirm("Count zero kar du?")){await api("reset",{id:i});load()}}
 async function dl(i){if(confirm("Key delete kar du? Wapas nahi aayegi.")){await api("delete",{id:i});load()}}
+async function vs(){if(!T)return;try{var r=await fetch("/v1/venice/status",{headers:{authorization:"Bearer "+T}});if(!r.ok)return;var j=await r.json();
+$("vv").innerHTML=j.jobs.length?j.jobs.map(function(o){var live=j.now-o.updated<8000&&!/^(done|error|timeout)/.test(o.stage||"");
+return'<div class="k"><div class="row"><b>'+E(o.stage)+(live?' <span class="bd on">live</span>':'')+'</b><span class="m">'+Math.round((o.ms||0)/1000)+'s · '+(o.chars||0)+' chars · '+ago(o.updated)+'</span></div>'+(o.preview?'<pre style="white-space:pre-wrap;margin:6px 0;background:#f4f4f5;padding:8px;border-radius:8px;font-size:12px">'+E(o.preview)+'</pre>':'')+'<div class="m">'+o.log.map(function(x){return E(x.stage)+(x.detail?' ('+E(x.detail)+')':'')+' '+Math.round(x.ms/1000)+'s'}).join(' → ')+'</div></div>'}).join(""):"Abhi koi Venice job nahi"}catch(e){}}
+setInterval(function(){if(T&&!$("app").hidden&&$("vl")&&$("vl").checked)vs()},2000);
 if(T)load();setInterval(function(){if(T&&!$("app").hidden)load()},15000);
 </script></body></html>`;

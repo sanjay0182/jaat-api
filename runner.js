@@ -29,7 +29,7 @@ const pplx = new PplxClient();
 const PPLX_TIMEOUT_MS = Number(process.env.PPLX_TIMEOUT_MS || 130000);
 // venice provider (DeepSeek V4, real Chrome, basic chat)
 const venice = new VeniceClient();
-const VENICE_TIMEOUT_MS = Number(process.env.VENICE_TIMEOUT_MS || 130000);
+const VENICE_TIMEOUT_MS = Number(process.env.VENICE_TIMEOUT_MS || 240000);
 
 const start = Date.now();
 duck.warmup(); // chrome + duck.ai page pehle se tayyar (background)
@@ -132,7 +132,7 @@ async function handle({ id, provider, name, body, stream }) {
   // job milte hi worker ko ack (nahi to worker 4s baad job dusre runner ko de deta hai)
   fetch(W + "/ack", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id }) }).catch(() => {});
   const t0 = Date.now();
-  let data, tries = 0;
+  let data, tries = 0, vlog = null;
   const sink = provider === "duck" && stream ? makeSink(id) : null; // sirf duck + stream=true par
   try {
     if (provider === "duck") {
@@ -145,7 +145,16 @@ async function handle({ id, provider, name, body, stream }) {
       data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS, j.size); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
     } else if (provider === "venice") {
       const j = JSON.parse(body);
-      data = await venice.chat({ model: j.model, messages: j.messages }, VENICE_TIMEOUT_MS);
+      let lastP = 0;
+      if (j.venice_status === true) vlog = [];
+      const onProgress = (p) => { // worker ko live status (generating sirf ~2s me ek baar)
+        if (vlog && p.stage !== "generating") vlog.push({ stage: p.stage, ms: p.ms, ...(p.detail ? { detail: p.detail } : {}), ...(p.chars != null ? { chars: p.chars } : {}) });
+        const now = Date.now();
+        if (p.stage === "generating" && now - lastP < 2000) return;
+        lastP = now;
+        fetch(W + "/progress", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id, provider: "venice", ...p }) }).catch(() => {});
+      };
+      data = await venice.chat({ model: j.model, messages: j.messages, files: j.files, onProgress }, VENICE_TIMEOUT_MS);
     } else if (provider === "perplexity") {
       const j = JSON.parse(body);
       data = await pplx.chat({ model: j.model, messages: j.messages }, PPLX_TIMEOUT_MS);
@@ -164,7 +173,7 @@ async function handle({ id, provider, name, body, stream }) {
   if (sink) await sink.end(); // error aaye tab bhi pehle bache chunks bhejo, phir final /result
   const ms = Date.now() - t0;
   console.log(provider || "jaat", "ms:", ms, "winner try:", tries);
-  try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; o._jaat_try = tries; data = JSON.stringify(o); } catch {}
+  try { const o = JSON.parse(data); o._jaat_upstream_ms = ms; o._jaat_try = tries; if (vlog) o.jaat_status = { log: vlog, ms }; data = JSON.stringify(o); } catch {}
   try {
     await fetch(W + "/result", {
       method: "POST", headers: { ...H, "content-type": "application/json" },

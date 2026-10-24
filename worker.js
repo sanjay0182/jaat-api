@@ -14,9 +14,9 @@ function failed(out) {
 
 // fail hue duck jawab se error message + kind nikalo (header me daalne layak saaf text)
 function errInfo(out) {
-  let msg = "timeout", kind = "timeout";
-  if (out) { try { const o = JSON.parse(out); msg = String(o.error || "error"); kind = o._jaat_kind || "error"; } catch { msg = "bad response"; kind = "error"; } }
-  return { msg: msg.replace(/[^\x20-\x7e]/g, " ").slice(0, 600), kind };
+  let msg = "timeout", kind = "timeout", st;
+  if (out) { try { const o = JSON.parse(out); msg = String(o.error || "error"); kind = o._jaat_kind || "error"; st = o.jaat_status; } catch { msg = "bad response"; kind = "error"; } }
+  return { msg: msg.replace(/[^\x20-\x7e]/g, " ").slice(0, 600), kind, st };
 }
 
 const DUCK_MODELS = [
@@ -67,6 +67,7 @@ export class Hub {
       this.duckModelsAt = (await state.storage.get("duckModelsAt")) || 0;
     });
     this.win = new Map();
+    this.progress = new Map(); // job id -> live provider progress (venice)
   }
 
   // keys/stats thodi der baad (2s) ek saath save
@@ -160,7 +161,7 @@ export class Hub {
       const model = String(job.model || "");
       const duckWait = Number(this.env.DUCK_WAIT_MS || 100000);
       const pplxWait = Number(this.env.PPLX_WAIT_MS || 140000);
-      const veniceWait = Number(this.env.VENICE_WAIT_MS || 140000);
+      const veniceWait = Number(this.env.VENICE_WAIT_MS || 260000);
       const fp = provider === "free" ? FREE_PROVIDERS.find((x) => x.name === name) : null;
       const freeWait = Number(this.env.FREE_WAIT_MS || ((fp && fp.timeout) || 600000) + 100000);
       const label = provider === "free" ? name : provider === "duck" ? model : provider === "duck-image" ? "duck-image" : provider === "perplexity" || provider === "venice" ? model : "vireonix";
@@ -215,6 +216,22 @@ export class Hub {
       this.waiters.get(id)?.(data);
       return new Response("ok");
     }
+
+    // runner se live progress (venice kya kar raha hai)
+    if (p === "/progress") {
+      const b = await req.json().catch(() => null);
+      if (b && b.id) {
+        const o = this.progress.get(b.id) || { id: b.id, provider: b.provider, started: Date.now(), log: [] };
+        o.stage = b.stage; o.ms = b.ms; o.updated = Date.now();
+        if (b.chars != null) o.chars = b.chars;
+        if (b.preview != null) o.preview = String(b.preview).slice(-200);
+        if (b.stage !== "generating") { o.log.push({ stage: b.stage, ms: b.ms, detail: b.detail }); o.log = o.log.slice(-30); }
+        this.progress.set(b.id, o);
+        while (this.progress.size > 10) this.progress.delete(this.progress.keys().next().value);
+      }
+      return new Response("ok");
+    }
+    if (p === "/progress-list") return Response.json({ now: Date.now(), jobs: [...this.progress.values()].reverse() });
 
     if (p === "/ack") { const { id } = await req.json(); this.unlease(id); return new Response("ok"); }
 
@@ -273,7 +290,7 @@ export class Hub {
       // error kind -> sahi HTTP status: ratelimit=429, challenge/ban/forbidden=403, timeout=504, baaki 502
       const status = e.kind === "ratelimit" ? 429 : /^(challenge|ban|forbidden)$/.test(e.kind) ? 403 : e.kind === "timeout" ? 504 : 502;
       if (status === 429) headers["retry-after"] = "60";
-      return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label } }), { status, headers });
+      return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label }, ...(e.st ? { jaat_status: e.st } : {}) }), { status, headers });
     }
     return new Response(out, { headers });
   }
@@ -334,6 +351,43 @@ export class Hub {
     return job;
   }
   unlease(id) { clearTimeout(this.leased.get(id)); this.leased.delete(id); }
+}
+
+// ---- venice files: photo/pdf/txt... (message ke saath ya akele). zip + video band, sab mila ke max 10MB ----
+const VFILE_MAX = 10 * 1024 * 1024, VFILE_MAX_N = 10;
+const BLOCK_EXT = /\.(zip|rar|7z|tar|gz|tgz|bz2|xz|mp4|mov|mkv|avi|webm|flv|wmv|m4v|mpg|mpeg|3gp)$/i;
+const BLOCK_MIME = /^(video\/|application\/(zip|x-zip-compressed|x-rar-compressed|vnd\.rar|x-7z-compressed|gzip|x-gzip|x-tar|x-bzip2|x-xz))/i;
+function extractVeniceFiles(messages) {
+  const bad = (message, status = 400) => ({ error: { message, type: "invalid_request_error" }, status });
+  const files = [], out = []; let total = 0;
+  for (const m of messages || []) {
+    if (!m || !Array.isArray(m.content)) { out.push(m); continue; }
+    const texts = [];
+    for (const p of m.content) {
+      if (typeof p === "string") { texts.push(p); continue; }
+      if (!p || typeof p !== "object") continue;
+      if (p.type === "text" || p.type === "input_text") { texts.push(p.text || ""); continue; }
+      let src, name = "", mime = "";
+      if (p.type === "image_url") { const u = p.image_url; src = typeof u === "string" ? u : u && u.url; }
+      else if (p.type === "file" || p.type === "input_file") { const f = p.file || p; src = f.file_data; name = f.filename || f.name || ""; mime = f.mime_type || ""; }
+      else continue;
+      src = String(src || "");
+      if (/^https?:\/\//i.test(src)) return bad("sirf base64 / data: URL chalega, http link nahi" + (name ? " (" + name + ")" : ""));
+      let b64 = src;
+      const dm = /^data:([^;,]*)[^,]*,/i.exec(src);
+      if (dm) { mime = dm[1] || mime; b64 = src.slice(dm[0].length); }
+      if (!b64) return bad("file/image me base64 data chahiye");
+      const ext = (mime.split("/")[1] || "bin").split("+")[0].replace("jpeg", "jpg");
+      name = (name || (p.type === "image_url" ? "image-" + (files.length + 1) + "." + ext : "file-" + (files.length + 1))).replace(/[^\w.\- ]/g, "_").slice(0, 80);
+      if (BLOCK_EXT.test(name) || BLOCK_MIME.test(mime)) return bad("zip / video files allowed nahi hain: " + name);
+      total += Math.floor(b64.length * 3 / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
+      if (files.length >= VFILE_MAX_N) return bad("max " + VFILE_MAX_N + " files");
+      if (total > VFILE_MAX) return bad("files ka total size 10MB se zyada hai", 413);
+      files.push({ name, mime, b64 });
+    }
+    out.push({ ...m, content: texts.join("\n") });
+  }
+  return { messages: out, files, total };
 }
 
 // ---- Anthropic / Responses <-> OpenAI chat translators ----------------------------------
@@ -551,6 +605,13 @@ async function handle(req, env) {
     return hub.fetch("https://hub/admin", { method: "POST", body: req.body });
   }
 
+  // live venice status: GET /v1/venice/status (api key ya admin key). Koi bhi time dekh sakte ho
+  if (u.pathname === "/v1/venice/status") {
+    const g = env.ADMIN_KEY && auth === env.ADMIN_KEY ? { ok: true } : await gate(false);
+    if (!g.ok) return deny(g);
+    return hub.fetch("https://hub/progress-list");
+  }
+
   if (u.pathname === "/v1/models") {
     const g = env.ADMIN_KEY && auth === env.ADMIN_KEY ? { ok: true } : await gate(false); // admin key se dashboard bhi list padh sakta hai
     if (!g.ok) return deny(g);
@@ -634,6 +695,8 @@ async function handle(req, env) {
     const cidRaw = j.conversation_id || req.headers.get("x-conversation-id") || j.user || "";
     const cid = cidRaw ? String(g.id || "legacy") + ":" + String(cidRaw).slice(0, 150) : "";
     const lg = duck ? normalizeLegacy(j) : { j, legacy: false };
+    let vm = j.messages || [], vf = [];
+    if (venice) { const x = extractVeniceFiles(vm); if (x.error) return Response.json({ error: x.error }, { status: x.status }); vm = x.messages; vf = x.files; }
     const job = duck
       ? { provider: "duck", model: j.model, stream: wantStream, body: JSON.stringify({ ...lg.j, stream: false, model: j.model, messages: j.messages || [], conversation_id: cid, legacy_fn: lg.legacy, reasoning_effort: j.reasoning_effort || j.reasoningEffort }) }
       : free
@@ -641,7 +704,7 @@ async function handle(req, env) {
       : pplx
       ? { provider: "perplexity", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
       : venice
-      ? { provider: "venice", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
+      ? { provider: "venice", model: j.model, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status === true }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
@@ -665,12 +728,12 @@ async function handle(req, env) {
     else firstDelta.content = (c.message && c.message.content) || "";
     const body =
       ev({ choices: [{ index: 0, delta: firstDelta, finish_reason: null }] }) +
-      ev({ choices: [{ index: 0, delta: {}, finish_reason: c.finish_reason || "stop" }] }) +
+      ev({ choices: [{ index: 0, delta: {}, finish_reason: c.finish_reason || "stop" }], ...(d.jaat_status ? { jaat_status: d.jaat_status } : {}) }) +
       "data: [DONE]\n\n";
     return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-jaat-provider": r.headers.get("x-jaat-provider") || "", "x-jaat-duck-error": r.headers.get("x-jaat-duck-error") || "", "x-jaat-duck-skipped": r.headers.get("x-jaat-duck-skipped") || "" } });
   }
 
-  if (["/next", "/result", "/ack", "/status", "/chunk", "/models"].includes(u.pathname)) {
+  if (["/next", "/result", "/ack", "/status", "/chunk", "/models", "/progress"].includes(u.pathname)) {
     if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
     return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
   }

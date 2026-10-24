@@ -32,8 +32,35 @@ const SEL = {
   answer: ['[data-role="assistant"]', '[data-message-role="assistant"]', '[class*="assistant" i]', '[class*="markdown" i]', "div.prose", ".prose"],
   stop: 'button[aria-label*="stop" i], button[title*="stop" i]',
   send: 'button[type="submit"], button[aria-label*="send" i]',
+  attach: 'button[aria-label*="attach" i], button[aria-label*="upload" i], button[aria-label*="file" i], button[title*="attach" i], button[title*="upload" i]',
   modelOpeners: '[data-testid*="model" i], button[aria-label*="model" i], button[aria-haspopup="listbox"], button[aria-haspopup="menu"], button:has-text("Venice")',
 };
+
+// upload par login/upgrade maange to wall maano (nav ke "Sign up" se confuse na ho)
+const UPLOAD_WALL = /(sign (up|in)|log ?in|upgrade|create (an )?account) (to|for) (upload|attach)|(upload|attach)\w* (is |are )?(only|require\w*|need\w*|available).{0,30}(account|sign|log ?in|pro|premium|paid)/i;
+const textLike = (name, mime) => /^text\//i.test(mime || "") || /\.(txt|md|csv|tsv|json|jsonl|xml|html?|css|js|mjs|ts|tsx|jsx|py|java|c|cpp|h|go|rs|rb|php|sh|sql|ya?ml|toml|ini|log|cfg)$/i.test(name || "");
+
+// files page ke file-input / attach button se daalo. Kaise hua wo naam lautata hai, na hua to null
+async function uploadFiles(page, att) {
+  const tryInput = async () => {
+    const i = page.locator('input[type="file"]').first();
+    if (!(await i.count())) return false;
+    await i.setInputFiles(att, { timeout: 8000 });
+    return true;
+  };
+  if (await tryInput()) return "input";
+  const btn = page.locator(SEL.attach).first();
+  if (await btn.count()) {
+    try { const [fc] = await Promise.all([page.waitForEvent("filechooser", { timeout: 4000 }), btn.click({ timeout: 3000 })]); await fc.setFiles(att); return "chooser"; } catch {}
+    try { // menu khula ho sakta hai: uske andar upload wala item
+      const it = page.getByText(/upload|add (a )?(photo|file|image)|attach/i).first();
+      if (await it.count()) { const [fc] = await Promise.all([page.waitForEvent("filechooser", { timeout: 4000 }), it.click({ timeout: 3000 })]); await fc.setFiles(att); return "menu"; }
+    } catch {}
+    try { if (await tryInput()) return "input-after"; } catch {}
+    try { await page.keyboard.press("Escape"); } catch {}
+  }
+  return null;
+}
 
 class VeniceError extends Error {
   constructor(msg, kind = "error") { super(msg); this.kind = kind; }
@@ -235,19 +262,33 @@ export class VeniceClient {
     throw new VeniceError("jaatvenice guest limit / login maang raha hai. Thodi der baad try karo", "ratelimit");
   }
 
-  async chat({ model, messages }, timeoutMs = 130000) {
-    const prompt = flatten(messages).slice(-MAX_PROMPT);
+  async chat({ model, messages, files, onProgress }, timeoutMs = 240000) {
+    const att = (files || []).map((f) => ({ name: f.name || "file", mimeType: f.mime || "application/octet-stream", buffer: Buffer.from(String(f.b64 || ""), "base64") }));
+    if (att.length && !(messages || []).some((m) => m && m.role === "user" && textOf(m.content).trim()))
+      messages = [...(messages || []), { role: "user", content: "Look at the attached file(s) and tell me what is in them." }];
+    let prompt = flatten(messages).slice(-MAX_PROMPT);
     if (!prompt.trim()) throw new VeniceError("empty prompt", "bad_request");
     await this.ensure();
     await this.slot();
-    const deadline = Date.now() + timeoutMs;
+    const t0 = Date.now();
+    const deadline = t0 + timeoutMs;
+    let lastGen = 0;
+    // live progress: console + (runner ke through) worker ko, taaki API se dekh sako venice kya kar raha hai
+    const prog = (stage, extra = {}) => {
+      const ms = Date.now() - t0;
+      console.log(`venice [${Math.round(ms / 1000)}s]: ${stage}` + (extra.detail ? " | " + extra.detail : "") + (extra.chars != null ? ` | ${extra.chars} chars` : ""));
+      try { onProgress && onProgress({ stage, ms, ...extra }); } catch {}
+    };
     let page;
     try {
+      prog("start");
       page = await this.ctx.newPage();
       await page.goto(URL0, { waitUntil: "domcontentloaded", timeout: 25000 });
+      prog("page-opened");
       await page.waitForTimeout(1500);
       await passChallenge(page);
       await dismissPopups(page);
+      prog("challenge-checked");
 
       const box = page.locator(SEL.input).first();
       try { await box.waitFor({ state: "visible", timeout: 12000 }); }
@@ -265,8 +306,30 @@ export class VeniceClient {
         }
       }
 
-      console.log("venice: model:", await pickModel(page));
+      prog("input-ready");
+      const pm = await pickModel(page);
+      prog("model", { detail: pm });
       await dismissPopups(page);
+
+      if (att.length) {
+        const mb = att.reduce((a, f) => a + f.buffer.length, 0) / 1048576;
+        prog("uploading", { detail: att.length + " file, " + mb.toFixed(1) + "MB" });
+        let how = null, why = "";
+        try { how = await uploadFiles(page, att); } catch (e) { why = String((e && e.message) || e).slice(0, 120); }
+        if (how) {
+          await page.waitForTimeout(Math.min(15000, 1500 + mb * 1500)); // upload/preview poora hone do
+          const bt = (await page.innerText("body").catch(() => "")).slice(0, 4000);
+          if (UPLOAD_WALL.test(bt)) { how = null; why = "login/upgrade maang raha hai"; }
+        }
+        if (how) prog("uploaded", { detail: how });
+        else {
+          await this.debug(page, "upload-fail");
+          const tx = att.filter((f) => textLike(f.name, f.mimeType));
+          if (tx.length !== att.length) throw new VeniceError("jaatvenice me file upload nahi ho paya (guest mode me band ho sakta hai) " + why + " | " + (await pageInfo(page)).slice(0, 250), "error");
+          prog("upload-fallback", { detail: "text files prompt me inline kiye" });
+          prompt = tx.map((f) => "[Attached file: " + f.name + "]\n" + f.buffer.toString("utf8").slice(0, 30000) + "\n[end of file]").join("\n\n") + "\n\n" + prompt;
+        }
+      }
 
       await box.click();
       await page.keyboard.insertText(prompt); // lamba prompt: paste jaisa
@@ -276,6 +339,7 @@ export class VeniceClient {
       await page.waitForTimeout(600);
       try { const sb = page.locator(SEL.send).first(); if ((await sb.count()) && (await box.innerText().catch(() => "")).trim().length > 5) await sb.click({ timeout: 1500 }); } catch {}
 
+      prog("prompt-sent", { chars: prompt.length });
       const probe = prompt.replace(/\s+/g, " ").slice(0, 40).trim();
       let last = "", stable = 0, started = false, via = "";
       while (Date.now() < deadline) {
@@ -283,15 +347,20 @@ export class VeniceClient {
         const r = await readAnswer(page, probe);
         const txt = (r.text || "").trim();
         if (txt) { started = true; via = r.via; }
+        if (txt && txt !== last && Date.now() - lastGen > 1500) { lastGen = Date.now(); prog("generating", { chars: txt.length, preview: txt.slice(-200) }); }
         const generating = (await page.locator(SEL.stop).count().catch(() => 0)) > 0;
         if (txt && txt === last && !generating) {
-          if (++stable >= 6) { console.log("venice: jawab via", via); await this.guard(txt, page); return completion(DEFAULT_MODEL, cleanAnswer(txt)); }
+          if (++stable >= 6) { prog("done", { chars: txt.length, detail: "via " + via }); await this.guard(txt, page); return completion(DEFAULT_MODEL, cleanAnswer(txt)); }
         } else stable = 0;
         last = txt;
       }
+      prog(started ? "timeout-partial" : "timeout", { chars: last.length });
       await this.debug(page, started ? "partial" : "timeout");
       if (last) { await this.guard(last, page); return completion(DEFAULT_MODEL, cleanAnswer(last)); } // adhura hi sahi
       throw new VeniceError("jaatvenice timeout (jawab nahi mila) | " + (await pageInfo(page)).slice(0, 300), "timeout");
+    } catch (e) {
+      prog("error", { detail: String((e && e.message) || e).slice(0, 200) });
+      throw e;
     } finally {
       try { await page?.close(); } catch {}
       this.free();
@@ -307,7 +376,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const c = new VeniceClient();
   try {
     const t0 = Date.now();
-    const r = JSON.parse(await c.chat({ model: "venice", messages: [{ role: "user", content: prompt }] }, 120000));
+    const r = JSON.parse(await c.chat({ model: "venice", messages: [{ role: "user", content: prompt }] }, 240000));
     console.log("\n=== VENICE OK in", Date.now() - t0, "ms ===\n" + r.choices[0].message.content);
     await c.close();
     process.exit(0);
