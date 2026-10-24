@@ -145,8 +145,8 @@ async function handle({ id, provider, name, body, stream }) {
       data = await duck.image(j.prompt, DUCK_IMAGE_TIMEOUT_MS, j.size); // {b64_json,mime} ya {url}; image na mile to error (fake nahi)
     } else if (provider === "venice") {
       const j = JSON.parse(body);
-      let lastP = 0;
-      if (j.venice_status === true) vlog = [];
+      let lastP = 0, lastCancelCheck = 0, stopped = false;
+      if (j.venice_status !== false) vlog = [];
       const onProgress = (p) => { // worker ko live status (generating sirf ~2s me ek baar)
         if (vlog && p.stage !== "generating") vlog.push({ stage: p.stage, ms: p.ms, ...(p.detail ? { detail: p.detail } : {}), ...(p.chars != null ? { chars: p.chars } : {}) });
         const now = Date.now();
@@ -154,7 +154,19 @@ async function handle({ id, provider, name, body, stream }) {
         lastP = now;
         fetch(W + "/progress", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id, provider: "venice", ...p }) }).catch(() => {});
       };
-      data = await venice.chat({ model: j.model, messages: j.messages, files: j.files, onProgress }, VENICE_TIMEOUT_MS);
+      // har ~1.5s me worker se poochho: ye job cancel hui kya (dashboard/API se manually, ya nayi request aane se)
+      const shouldStop = async () => {
+        const now = Date.now();
+        if (now - lastCancelCheck < 1500) return stopped;
+        lastCancelCheck = now;
+        try {
+          const r = await fetch(W + "/cancel-check", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id }) });
+          const j2 = await r.json();
+          if (j2.cancelled) stopped = true;
+        } catch {}
+        return stopped;
+      };
+      data = await venice.chat({ model: j.model, messages: j.messages, files: j.files, onProgress, shouldStop }, VENICE_TIMEOUT_MS);
     } else if (provider === "perplexity") {
       const j = JSON.parse(body);
       data = await pplx.chat({ model: j.model, messages: j.messages }, PPLX_TIMEOUT_MS);

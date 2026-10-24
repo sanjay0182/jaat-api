@@ -262,7 +262,7 @@ export class VeniceClient {
     throw new VeniceError("jaatvenice guest limit / login maang raha hai. Thodi der baad try karo", "ratelimit");
   }
 
-  async chat({ model, messages, files, onProgress }, timeoutMs = 240000) {
+  async chat({ model, messages, files, onProgress, shouldStop }, timeoutMs = 240000) {
     const att = (files || []).map((f) => ({ name: f.name || "file", mimeType: f.mime || "application/octet-stream", buffer: Buffer.from(String(f.b64 || ""), "base64") }));
     if (att.length && !(messages || []).some((m) => m && m.role === "user" && textOf(m.content).trim()))
       messages = [...(messages || []), { role: "user", content: "Look at the attached file(s) and tell me what is in them." }];
@@ -343,6 +343,10 @@ export class VeniceClient {
       const probe = prompt.replace(/\s+/g, " ").slice(0, 40).trim();
       let last = "", stable = 0, started = false, via = "";
       while (Date.now() < deadline) {
+        if (shouldStop && (await shouldStop())) {
+          prog("cancelled", { chars: last.length });
+          throw new VeniceError("jaatvenice request cancel ho gayi", "cancelled");
+        }
         await page.waitForTimeout(400);
         const r = await readAnswer(page, probe);
         const txt = (r.text || "").trim();

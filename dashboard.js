@@ -127,7 +127,8 @@ J({model:"gpt-4o",instructions:"You are helpful.",input:"Hello"}),
 "   reply: output_text. input can also be a list of items incl. function_call / function_call_output.",
 "",
 "7) JAATVENICE EXTRAS (only model jaatvenice, POST /v1/chat/completions)",
-"   venice_status:true  -> reply gets jaat_status {log:[{stage,ms}...], ms} (stages: start, page-opened, input-ready, model, uploading, prompt-sent, generating, done). false/missing = nothing extra. Live view: dashboard 'Venice Live' or GET /v1/venice/status",
+"   venice_status: ON by default -> reply gets jaat_status {log:[{stage,ms}...], ms} (stages: start, page-opened, input-ready, model, uploading, prompt-sent, generating, done/cancelled/error). Send venice_status:false to turn it off. Live view: dashboard 'Venice Live' or GET /v1/venice/status",
+"   cancel a running job: POST /v1/venice/cancel {\\\"id\\\":\\\"job-id-from-venice/status\\\"} (api key or admin key), or the Stop button in dashboard 'Venice Live'. Starting a NEW jaatvenice request with the same api key auto-cancels that key's previous still-running jaatvenice job.",
 "   files: put parts inside the user message content list: {type:'text',text:'...'}, {type:'image_url',image_url:{url:'data:image/png;base64,...'}}, {type:'file',file:{filename:'a.pdf',file_data:'data:application/pdf;base64,...'}}. Text with files, or files alone, both work.",
 "   file limits: max 10MB total for all files (413 if more), max 10 files, zip/rar/7z/tar/gz and video are rejected (400), only base64 / data: URL (no http links). Upload depends on venice page; if it cannot upload, an error says so (text-type files then go inline in the prompt).",
 "",
@@ -141,8 +142,9 @@ async function tg(i,v){await api("update",{id:i,disabled:v});load()}
 async function rs(i){if(confirm("Count zero kar du?")){await api("reset",{id:i});load()}}
 async function dl(i){if(confirm("Key delete kar du? Wapas nahi aayegi.")){await api("delete",{id:i});load()}}
 async function vs(){if(!T)return;try{var r=await fetch("/v1/venice/status",{headers:{authorization:"Bearer "+T}});if(!r.ok)return;var j=await r.json();
-$("vv").innerHTML=j.jobs.length?j.jobs.map(function(o){var live=j.now-o.updated<8000&&!/^(done|error|timeout)/.test(o.stage||"");
-return'<div class="k"><div class="row"><b>'+E(o.stage)+(live?' <span class="bd on">live</span>':'')+'</b><span class="m">'+Math.round((o.ms||0)/1000)+'s · '+(o.chars||0)+' chars · '+ago(o.updated)+'</span></div>'+(o.preview?'<pre style="white-space:pre-wrap;margin:6px 0;background:#f4f4f5;padding:8px;border-radius:8px;font-size:12px">'+E(o.preview)+'</pre>':'')+'<div class="m">'+o.log.map(function(x){return E(x.stage)+(x.detail?' ('+E(x.detail)+')':'')+' '+Math.round(x.ms/1000)+'s'}).join(' → ')+'</div></div>'}).join(""):"Abhi koi Venice job nahi"}catch(e){}}
+$("vv").innerHTML=j.jobs.length?j.jobs.map(function(o){var live=j.now-o.updated<8000&&!/^(done|error|timeout|cancelled)/.test(o.stage||"");
+return'<div class="k"><div class="row"><b>'+E(o.stage)+(live?' <span class="bd on">live</span>':'')+'</b><span class="m">'+Math.round((o.ms||0)/1000)+'s · '+(o.chars||0)+' chars · '+ago(o.updated)+(live?' · <button onclick="vcancel(\\''+o.id+'\\')">Stop</button>':'')+'</span></div>'+(o.preview?'<pre style="white-space:pre-wrap;margin:6px 0;background:#f4f4f5;padding:8px;border-radius:8px;font-size:12px">'+E(o.preview)+'</pre>':'')+'<div class="m">'+o.log.map(function(x){return E(x.stage)+(x.detail?' ('+E(x.detail)+')':'')+' '+Math.round(x.ms/1000)+'s'}).join(' → ')+'</div></div>'}).join(""):"Abhi koi Venice job nahi"}catch(e){}}
+async function vcancel(id){try{await fetch("/v1/venice/cancel",{method:"POST",headers:{authorization:"Bearer "+T,"content-type":"application/json"},body:JSON.stringify({id:id})});vs()}catch(e){}}
 setInterval(function(){if(T&&!$("app").hidden&&$("vl")&&$("vl").checked)vs()},2000);
 if(T)load();setInterval(function(){if(T&&!$("app").hidden)load()},15000);
 </script></body></html>`;

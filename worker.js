@@ -68,6 +68,8 @@ export class Hub {
     });
     this.win = new Map();
     this.progress = new Map(); // job id -> live provider progress (venice)
+    this.cancelled = new Set(); // job id -> cancel maanga gaya (runner yahan dekh ke rukta hai)
+    this.activeVenice = new Map(); // api key id -> abhi chal rahi venice job id (nayi aaye to purani cancel)
   }
 
   // keys/stats thodi der baad (2s) ek saath save
@@ -182,7 +184,7 @@ export class Hub {
         return this.streamResponse(id, st, deadline, model, label);
       }
 
-      const out = await this.run(provider, job.body, wait, name);
+      const out = await this.run(provider, job.body, wait, name, job.keyId);
       return this.reply(out, provider, label);
     }
 
@@ -235,6 +237,26 @@ export class Hub {
 
     if (p === "/ack") { const { id } = await req.json(); this.unlease(id); return new Response("ok"); }
 
+    // client (dashboard / API) ne cancel manga. Runner is id ko progress-check ke beech me dekh ke chhod deta hai
+    if (p === "/cancel") {
+      const { id } = await req.json().catch(() => ({}));
+      if (!id) return Response.json({ ok: false, error: "id chahiye" }, { status: 400 });
+      this.cancelled.add(id);
+      // queue me pada ho (abhi runner tak gaya hi nahi) to seedha hata do, waiter ko turant "cancelled" do
+      this.cleanup(id);
+      this.waiters.get(id)?.(JSON.stringify({ error: "cancel kiya gaya", _jaat_kind: "cancelled" }));
+      const o = this.progress.get(id);
+      if (o) { o.stage = "cancelled"; o.updated = Date.now(); }
+      return Response.json({ ok: true, id });
+    }
+    // runner har progress tick ke beech me ye poochhta hai: ye id cancel hui kya
+    if (p === "/cancel-check") {
+      const { id } = await req.json().catch(() => ({}));
+      const c = id && this.cancelled.has(id);
+      if (c) this.cancelled.delete(id);
+      return Response.json({ cancelled: !!c });
+    }
+
     if (p === "/status") return Response.json({ lastRequest: this.lastRequest });
 
     return new Response("not found", { status: 404 });
@@ -271,10 +293,17 @@ export class Hub {
   }
 
   // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
-  async run(provider, body, waitMs, name) {
+  // keyId diya ho aur provider venice ho: usi key ki pichhli chal rahi venice job khud-ba-khud cancel ho jati hai
+  async run(provider, body, waitMs, name, keyId) {
+    if (provider === "venice" && keyId) {
+      const prev = this.activeVenice.get(keyId);
+      if (prev) { this.cancelled.add(prev); this.cleanup(prev); this.waiters.get(prev)?.(JSON.stringify({ error: "nayi request aayi, purani cancel", _jaat_kind: "cancelled" })); }
+    }
     const { id, done } = await this.enqueue(provider, body, name, false);
+    if (provider === "venice" && keyId) this.activeVenice.set(keyId, id);
     const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), waitMs))]);
-    this.cleanup(id);
+    this.cleanup(id); this.cancelled.delete(id);
+    if (provider === "venice" && keyId && this.activeVenice.get(keyId) === id) this.activeVenice.delete(keyId);
     return out;
   }
 
@@ -288,7 +317,7 @@ export class Hub {
       const e = errInfo(out);
       headers["x-jaat-error"] = e.msg;
       // error kind -> sahi HTTP status: ratelimit=429, challenge/ban/forbidden=403, timeout=504, baaki 502
-      const status = e.kind === "ratelimit" ? 429 : /^(challenge|ban|forbidden)$/.test(e.kind) ? 403 : e.kind === "timeout" ? 504 : 502;
+      const status = e.kind === "ratelimit" ? 429 : /^(challenge|ban|forbidden)$/.test(e.kind) ? 403 : e.kind === "timeout" ? 504 : e.kind === "cancelled" ? 409 : 502;
       if (status === 429) headers["retry-after"] = "60";
       return new Response(JSON.stringify({ error: { message: label + ": " + e.msg, type: e.kind, provider: label }, ...(e.st ? { jaat_status: e.st } : {}) }), { status, headers });
     }
@@ -612,6 +641,15 @@ async function handle(req, env) {
     return hub.fetch("https://hub/progress-list");
   }
 
+  // chalti hui venice job rokni ho: POST /v1/venice/cancel {"id":"job-id"} (api key ya admin key)
+  if (u.pathname === "/v1/venice/cancel") {
+    const g = env.ADMIN_KEY && auth === env.ADMIN_KEY ? { ok: true } : await gate(false);
+    if (!g.ok) return deny(g);
+    let b; try { b = await req.json(); } catch { return Response.json({ error: { message: "bad json", type: "invalid_request_error" } }, { status: 400 }); }
+    if (!b || !b.id) return Response.json({ error: { message: "id chahiye", type: "invalid_request_error" } }, { status: 400 });
+    return hub.fetch("https://hub/cancel", { method: "POST", body: JSON.stringify({ id: b.id }) });
+  }
+
   if (u.pathname === "/v1/models") {
     const g = env.ADMIN_KEY && auth === env.ADMIN_KEY ? { ok: true } : await gate(false); // admin key se dashboard bhi list padh sakta hai
     if (!g.ok) return deny(g);
@@ -704,7 +742,7 @@ async function handle(req, env) {
       : pplx
       ? { provider: "perplexity", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
       : venice
-      ? { provider: "venice", model: j.model, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status === true }) }
+      ? { provider: "venice", model: j.model, keyId: g.id, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status !== false }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
