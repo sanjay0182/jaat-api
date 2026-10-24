@@ -193,6 +193,9 @@ async function readAnswer(page, probe) {
 function cleanAnswer(t) {
   const lines = String(t || "").split(/\r?\n/);
   const out = [];
+  // Venice page ke UI button / label (poori line sirf yahi ho tabhi hatao, jawab ka asli text na kate)
+  const UI_LINE = /^(copy|copied!?|regenerate|retry|try again|share|edit|read aloud|good response|bad response|like|dislike|report|more)$/i;
+  const NOTICE = /^(venice|ai) can make mistakes\b.*$/i;
   for (const l of lines) {
     const x = l.replace(/[\u200b-\u200d\u00a0\ufeff]/g, " ").trim();
     if (/^(worked|thought|thinking|reasoned) for\b.*$/i.test(x)) continue;          // Worked for 2s · 1 step
@@ -200,10 +203,17 @@ function cleanAnswer(t) {
       if (out.length && /^[A-Za-z+#.\-]{1,14}$/.test(out[out.length - 1].trim())) out.pop();
       continue;
     }
+    if (UI_LINE.test(x) || NOTICE.test(x)) continue;
+    if (/^\[(files?|attached file|end of file|image)\b[^\]]*\]$/i.test(x)) continue; // bot ke history tag ([files: a.jpg]) jawab me echo ho gaye to hatao
     out.push(l);
   }
+  // shuru me role label ("Assistant:", "Human:" ...) lagake jawab diya ho to hatao
+  let body = out.join("\n").replace(/^\s*(?:(?:assistant|jaatvenice|ai)\s*:\s*)+/i, "");
+  // transcript aage badha diya ho ("Human: ..." se naya turn shuru) to wahan se kaat do
+  const cut = body.search(/\n\s*(?:human|user)\s*:\s/i);
+  if (cut > 0) body = body.slice(0, cut);
   // jawab me "Venice" / "Venice.ai" likha ho to "jaatvenice" kar do (link/URL ko mat chhedo)
-  const res = out.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+  const res = body.replace(/\n{3,}/g, "\n\n").trim()
     .replace(/(?<![\/\w.@-])venice(?:\.ai)?(?![\w\/-])/gi, (m) => (m[0] === "V" ? "Jaatvenice" : "jaatvenice"));
   return res || String(t || "").trim(); // sab hat gaya to original
 }

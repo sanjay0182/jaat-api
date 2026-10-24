@@ -389,8 +389,26 @@ const BLOCK_MIME = /^(video\/|application\/(zip|x-zip-compressed|x-rar-compresse
 function extractVeniceFiles(messages) {
   const bad = (message, status = 400) => ({ error: { message, type: "invalid_request_error" }, status });
   const files = [], out = []; let total = 0;
-  for (const m of messages || []) {
+  // SIRF aakhri user message ki files upload hongi. Purane messages me jo file/image thi use dobara nahi bhejte:
+  // uski jagah bas "[file: naam]" likha rehta hai, baaki purani chat (text) waisi hi jati hai.
+  const msgs = messages || [];
+  let lastUser = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i] && msgs[i].role === "user") { lastUser = i; break; }
+  for (let mi = 0; mi < msgs.length; mi++) {
+    const m = msgs[mi];
     if (!m || !Array.isArray(m.content)) { out.push(m); continue; }
+    if (mi !== lastUser) { // purana message: file/image parts hatao, text rakho
+      const old = [];
+      for (const p of m.content) {
+        if (typeof p === "string") { old.push(p); continue; }
+        if (!p || typeof p !== "object") continue;
+        if (p.type === "text" || p.type === "input_text") old.push(p.text || "");
+        else if (p.type === "image_url") old.push("[image]");
+        else if (p.type === "file" || p.type === "input_file") { const f = p.file || p; old.push("[file: " + String(f.filename || f.name || "file").replace(/[^\w.\- ]/g, "_").slice(0, 80) + "]"); }
+      }
+      out.push({ ...m, content: old.join("\n") });
+      continue;
+    }
     const texts = [];
     for (const p of m.content) {
       if (typeof p === "string") { texts.push(p); continue; }
