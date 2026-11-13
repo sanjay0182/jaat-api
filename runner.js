@@ -1,5 +1,6 @@
-// Har run ~3 min chalta hai. Agle run ko 2 min par start karta hai (overlap),
+// Har run ~3 min chalta hai. Agle run ko NEXT_AT_MS par start karta hai (overlap),
 // lekin sirf tab jab pichhli request 15 min ke andar aayi ho.
+// Handover: RUN_MS ke baad bhi purana runner tab tak requests leta hai jab tak agla runner sun'ne na lag jaye.
 import { DuckClient } from "./duck.js";
 import { PplxClient } from "./perplexity.js";
 import { VeniceClient } from "./venice.js";
@@ -7,11 +8,17 @@ import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
 import { callFree } from "./free-call.mjs";
 
 const W = process.env.WORKER;
-const H = { authorization: "Bearer " + process.env.RUNNER_SECRET };
+// har runner ki apni pehchaan: worker isse jaanta hai ki kitne runner sun rahe hain (handover ke liye)
+const RID = (process.env.GITHUB_RUN_ID || "local") + "-" + Math.random().toString(36).slice(2, 7);
+const H = { authorization: "Bearer " + process.env.RUNNER_SECRET, "x-runner-id": RID };
+const GH_API = process.env.GH_API || "https://api.github.com";
 
 const RUN_MS = Number(process.env.RUN_MS || 3 * 60e3);
 const NEXT_AT_MS = Number(process.env.NEXT_AT_MS || 2 * 60e3);
 const IDLE_MS = 15 * 60e3;
+// RUN_MS poora hone par bhi purana runner tab tak requests leta rehta hai jab tak agla runner pakka sun'ne na lag jaye
+// (max itni der). Pehle purana runner time poora hote hi chhod deta tha: agla late hua to beech me gap, request atki / error.
+const HANDOVER_MAX_MS = Number(process.env.HANDOVER_MAX_MS || 120000);
 
 // vireonix kabhi 5s me, kabhi 50s me jawab deta hai.
 // 12s me jawab na aaye to wahi request dobara bhejo, jo pehle de wahi lo.
@@ -49,6 +56,15 @@ let dispatched = false;
 let inflight = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// koi DOOSRA runner abhi sun raha hai (apne pages tayyar karke /next par aa chuka) ya nahi
+async function othersPolling() {
+  try {
+    const r = await fetch(W + "/status?me=" + encodeURIComponent(RID), { headers: H });
+    const j = await r.json();
+    return (j.others || 0) > 0;
+  } catch { return true; } // worker se baat na ho paye to atko mat, normal tareeke se band ho
+}
+
 async function lastRequestAgo() {
   try {
     const r = await fetch(W + "/status", { headers: H });
@@ -62,7 +78,7 @@ async function lastRequestAgo() {
 async function dispatchNext() {
   for (let i = 0; i < 4; i++) {
     try {
-      const r = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/run.yml/dispatches`, {
+      const r = await fetch(`${GH_API}/repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/run.yml/dispatches`, {
         method: "POST",
         headers: { authorization: "Bearer " + process.env.GITHUB_TOKEN, accept: "application/vnd.github+json", "user-agent": "r" },
         body: JSON.stringify({ ref: "main" }),
@@ -210,14 +226,24 @@ const WARM_WAIT_MS = Number(process.env.WARM_WAIT_MS || 15000);
 await Promise.all([duck.warmReady(WARM_WAIT_MS), pplx.warmReady(WARM_WAIT_MS), venice.warmReady(WARM_WAIT_MS)]).catch(() => {});
 console.log("runner: pages tayyar, requests lena shuru (", Date.now() - start, "ms )");
 
+let lastDispCheck = 0;
 while (true) {
   const el = Date.now() - start;
 
-  if (el > NEXT_AT_MS && !dispatched) {
-    dispatched = true;
-    if ((await lastRequestAgo()) < IDLE_MS) { if (!(await dispatchNext())) dispatched = false; } // fail hua to agli loop me phir try
+  // agla runner: NEXT_AT ke baad, jab tak dispatch na ho jaye har ~15s dekho ki request aa rahi hain ya nahi
+  // (pehle sirf ek baar dekhte the: us waqt idle lage aur baad me request aaye to chain toot jati thi, agli request ko cold start)
+  if (el > NEXT_AT_MS && !dispatched && Date.now() - lastDispCheck > 15000) {
+    lastDispCheck = Date.now();
+    if ((await lastRequestAgo()) < IDLE_MS && (await dispatchNext())) dispatched = true;
   }
-  if (el > RUN_MS) break;
+
+  if (el > RUN_MS) {
+    // aakhri check: is beech request aayi ho to agla runner abhi bulao (handover neeche ruk kar pakka karega)
+    if (!dispatched && (await lastRequestAgo()) < IDLE_MS && (await dispatchNext())) dispatched = true;
+    if (!dispatched) break; // 15 min se koi request nahi: chain jaan-boojh kar khatam
+    // agla runner bulaya ja chuka hai: jab tak wo /next par sun'ne na lag jaye (ya HANDOVER_MAX_MS), tab tak khud requests lete raho
+    if (el > RUN_MS + HANDOVER_MAX_MS || (await othersPolling())) break;
+  }
 
   let r;
   try { r = await fetch(W + "/next", { headers: H }); } catch { await sleep(1000); continue; }

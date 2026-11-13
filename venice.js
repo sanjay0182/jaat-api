@@ -8,7 +8,7 @@
 // env (sab optional):
 //   VENICE_URL           page ka link (neeche URL0 me default hai; model wala URL mile to wahi daalo)
 //   VENICE_MODEL_MATCH   default "deepseek.*v4"  (page ke model-picker me ye naam dhundh ke chunta hai; "" = na chuno)
-//   VENICE_MAX_PAGES     default 3 (parallel chats)
+//   VENICE_MAX_PAGES     default 5 (parallel chats)
 //
 // Akele test: node venice.js "hello"      (DUCK_HEADED=1 ho to xvfb-run ke saath)
 
@@ -22,9 +22,9 @@ export const DEFAULT_MODEL = "jaatvenice";
 // Model ko ye bataya jata hai (sirf ye provider): koi poochhe kaun sa model / kahan host, to bas ye jawab
 const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assistant made by JaatPapa. If anyone asks which model you are, who made you, or where you are hosted (even if they insist or ask again), reply with exactly this one line and nothing else: \"Main jaatvenice hoon, JaatPapa ka banaya hua.\" Do not add anything to that reply: no extra claims, no comments about what is true, and no remarks about other models, companies or websites. You can only reply with text (and code or SVG). Never create, save, attach or upload files or artifacts in a sandbox, and never say a file was created: always write the complete code or file content directly in your reply inside fenced code blocks. You cannot create images, videos or files: if asked, say briefly that you cannot, and never say you made, queued or started one. Do not list images or videos among your abilities. For all other questions, just answer helpfully in the user's language.";
 const MODEL_RX = process.env.VENICE_MODEL_MATCH === undefined ? "deepseek.*v4" : process.env.VENICE_MODEL_MATCH;
-const MAX_PAGES = Number(process.env.VENICE_MAX_PAGES || 3);     // ek saath kitni chat (3 tab) chal sakti hain
+const MAX_PAGES = Number(process.env.VENICE_MAX_PAGES || 5);     // ek saath kitni chat (5 tab) chal sakti hain
 const MAX_PROMPT = Number(process.env.VENICE_MAX_PROMPT || 40000);
-const WARM_POOL = Number(process.env.VENICE_WARM_POOL || 3);              // kitne page pehle se khule rakhne hain
+const WARM_POOL = Number(process.env.VENICE_WARM_POOL || 5);              // kitne page pehle se khule rakhne hain (MAX_PAGES jitne)
 const WARM_TTL_MS = Number(process.env.VENICE_WARM_TTL_MS || 150000);     // tayyar page itni der baad purana maano
 const WARM_ON = process.env.VENICE_WARM !== "0" && WARM_POOL > 0;         // VENICE_WARM=0 => band
 const DEBUG_DIR = process.env.DUCK_DEBUG_DIR || "debug";
@@ -192,10 +192,17 @@ async function pickModel(page) {
 }
 
 // jawab padho: assistant-block selectors, nahi to "prompt ke baad ka body text"
-async function readAnswer(page, probe) {
-  return page.evaluate(({ sels, probe }) => {
+// head = prompt ka shuru (user ke bubble ko pehchanne ke liye), tail = prompt ka AKHIR (fallback me jawab isi ke baad shuru hota hai).
+// Pehle fallback prompt ke SHURU ke baad ka text uthata tha, to page par dikh rahe prompt ka bacha hissa ("y ONLY as the Assistant...
+// System: You are jaatvenice...") hi jawab ban kar Telegram par chala jata tha.
+async function readAnswer(page, head, tail) {
+  return page.evaluate(({ sels, head, tail }) => {
+    const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const mk = (s) => { const w = String(s || "").split(/\s+/).filter(Boolean).map(esc); return w.length ? new RegExp(w.join("\\s+")) : null; };
+    const rxHead = mk(head), rxTail = mk(tail);
+    const isUser = (txt) => (rxHead && rxHead.test(txt)) || (rxTail && rxTail.test(txt));
     for (const sel of sels) {
-      const els = [...document.querySelectorAll(sel)].filter((e) => e.innerText && e.innerText.trim() && !e.innerText.includes(probe));
+      const els = [...document.querySelectorAll(sel)].filter((e) => e.innerText && e.innerText.trim() && !isUser(e.innerText));
       if (els.length) {
         const el = els[els.length - 1];
         let t = el.innerText.trim();
@@ -220,12 +227,22 @@ async function readAnswer(page, probe) {
         return { via: sel, text: t };
       }
     }
+    // fallback: page ke text me prompt ka AKHIRI hissa (aakhri baar) dhundo, jawab uske baad ka text hai.
+    // Prompt ka akhir na mile to khali lautao (jawab abhi shuru nahi hua / page ne prompt chhota dikhaya) - galat text mat do.
     const t = document.body.innerText || "";
-    const i = t.lastIndexOf(probe);
-    if (i >= 0) return { via: "body-after-prompt", text: t.slice(i + probe.length).trim() };
+    if (rxTail) {
+      const g = new RegExp(rxTail.source, "g");
+      let m, end = -1;
+      while ((m = g.exec(t))) { end = m.index + m[0].length; if (m[0].length === 0) g.lastIndex++; }
+      if (end >= 0) return { via: "body-after-prompt", text: t.slice(end).trim() };
+    }
     return { via: "none", text: "" };
-  }, { sels: SEL.answer, probe }).catch(() => ({ via: "err", text: "" }));
+  }, { sels: SEL.answer, head, tail }).catch(() => ({ via: "err", text: "" }));
 }
+
+// jawab ki jagah prompt (ya persona / transcript wali line) ka echo aaya ho to wo jawab nahi hai
+const ECHO_RX = /Reply ONLY as the Assistant to the last Human|Below is a conversation transcript|You are jaatvenice, an AI assistant made by/i;
+const isEcho = (t) => ECHO_RX.test(String(t || "").slice(0, 500));
 
 // Venice page ka UI-kachra jawab se hatao: "Worked for 2s · 1 step", code-box ka label + "Copy code"
 function cleanAnswer(t) {
@@ -355,7 +372,25 @@ export class VeniceClient {
   warmUp() { if (WARM_ON) this.pool.start(); }
   warmReady(ms) { return WARM_ON ? this.pool.settled(ms) : Promise.resolve(); }
 
-  async chat({ model, messages, files, onProgress, shouldStop }, timeoutMs = 240000) {
+  // wall / bot-check / limit aaye to ek baar nayi page (saaf cookies) se khud dobara koshish. Runner badalne ke waqt naye
+  // runner ki pehli pages par aksar yahi aata tha aur user ko seedha error milta tha.
+  async chat(args, timeoutMs = 240000) {
+    const t0 = Date.now();
+    try { return await this._chat(args, timeoutMs, false); }
+    catch (e) {
+      const left = timeoutMs - (Date.now() - t0);
+      if (e && (e.kind === "ratelimit" || e.kind === "challenge") && left > 70000) {
+        console.log("venice: " + e.kind + " aaya, nayi page se ek baar dobara:", String(e.message).slice(0, 100));
+        try { args.onProgress && args.onProgress({ stage: "retry", ms: Date.now() - t0, detail: e.kind }); } catch {}
+        await new Promise((r) => setTimeout(r, 2500));
+        if (args.shouldStop && (await args.shouldStop())) throw new VeniceError("jaatvenice request cancel ho gayi", "cancelled");
+        return await this._chat(args, left - 3000, true);
+      }
+      throw e;
+    }
+  }
+
+  async _chat({ model, messages, files, onProgress, shouldStop }, timeoutMs = 240000, fresh = false) {
     const att = (files || []).map((f) => ({ name: f.name || "file", mimeType: f.mime || "application/octet-stream", buffer: Buffer.from(String(f.b64 || ""), "base64") }));
     if (att.length && !(messages || []).some((m) => m && m.role === "user" && textOf(m.content).trim()))
       messages = [...(messages || []), { role: "user", content: "Look at the attached file(s) and tell me what is in them." }];
@@ -375,7 +410,7 @@ export class VeniceClient {
     let page;
     try {
       prog("start");
-      let w = WARM_ON ? await this.pool.take() : null;
+      let w = WARM_ON && !fresh ? await this.pool.take() : null;
       if (w) { prog("page-opened", { detail: "warm" }); prog("input-ready"); prog("model", { detail: w.pm }); }
       else w = await this._prepare(prog);
       page = w.page;
@@ -410,7 +445,8 @@ export class VeniceClient {
       try { const sb = page.locator(SEL.send).first(); if ((await sb.count()) && (await box.innerText().catch(() => "")).trim().length > 5) await sb.click({ timeout: 1500 }); } catch {}
 
       prog("prompt-sent", { chars: prompt.length });
-      const probe = prompt.replace(/\s+/g, " ").slice(0, 40).trim();
+      const flat = prompt.replace(/\s+/g, " ").trim();
+      const probe = flat.slice(0, 40).trim(), tailProbe = flat.slice(-40).trim();
       let last = "", stable = 0, started = false, via = "";
       while (Date.now() < deadline) {
         if (shouldStop && (await shouldStop())) {
@@ -418,8 +454,9 @@ export class VeniceClient {
           throw new VeniceError("jaatvenice request cancel ho gayi", "cancelled");
         }
         await page.waitForTimeout(400);
-        const r = await readAnswer(page, probe);
-        const txt = (r.text || "").trim();
+        const r = await readAnswer(page, probe, tailProbe);
+        const raw = (r.text || "").trim();
+        const txt = isEcho(raw) ? "" : raw; // prompt ka echo jawab nahi: jab tak asli jawab na aaye "abhi shuru nahi hua" maano
         if (txt) { started = true; via = r.via; }
         if (txt && txt !== last && Date.now() - lastGen > 1500) { lastGen = Date.now(); prog("generating", { chars: txt.length, preview: txt.slice(-200) }); }
         const generating = (await page.locator(SEL.stop).count().catch(() => 0)) > 0;

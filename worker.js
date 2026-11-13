@@ -70,6 +70,22 @@ export class Hub {
     this.progress = new Map(); // job id -> live provider progress (venice)
     this.cancelled = new Set(); // job id -> cancel maanga gaya (runner yahan dekh ke rukta hai)
     this.activeVenice = new Map(); // api key id -> abhi chal rahi venice job id (nayi aaye to purani cancel)
+    this.vrun = new Set();   // runner ko di gayi (chal rahi) venice jobs ke id: sab runners mila ke max VENICE_MAX_PAR
+    this.runners = new Map(); // runner id -> aakhri baar /next kab aaya (handover ke liye: agla runner sun raha hai ya nahi)
+  }
+
+  // sab runners mila ke ek saath kitni venice jobs chal sakti hain (runner badalte waqt do runner overlap me hote hain,
+  // to har ek ke 5 page ginte to 10 ho jate). Baaki jobs queue me rukti hain aur baari aane par apne aap jati hain.
+  veniceCap() { const n = Number(this.env.VENICE_MAX_PAR || 5); return n > 0 ? n : 5; }
+  runnerAlive() { return Date.now() - this.lastSeen < 40000; }
+  // queue se pehli aisi job nikalo jo abhi chal sakti hai (venice par cap, baaki providers par nahi)
+  pickJob() {
+    const cap = this.veniceCap();
+    const i = this.queue.findIndex(j => j.provider !== "venice" || this.vrun.size < cap);
+    if (i < 0) return null;
+    const job = this.queue.splice(i, 1)[0];
+    if (job.provider === "venice") this.vrun.add(job.id);
+    return job;
   }
 
   // keys/stats thodi der baad (2s) ek saath save
@@ -184,7 +200,7 @@ export class Hub {
         return this.streamResponse(id, st, deadline, model, label);
       }
 
-      const out = await this.run(provider, job.body, wait, name, job.keyId);
+      const out = await this.run(provider, job.body, wait, name, job.keyId, { ref: job.ref });
       return this.reply(out, provider, label);
     }
 
@@ -200,12 +216,19 @@ export class Hub {
 
     if (p === "/next") {
       this.lastSeen = Date.now();
-      if (this.queue.length) return Response.json(this.lease(this.queue.shift()));
+      const rid = req.headers.get("x-runner-id");
+      if (rid) this.runners.set(rid, this.lastSeen);
+      const first = this.pickJob();
+      if (first) return Response.json(this.lease(first));
       return new Promise(res => {
         this.pollers.push(res);
         setTimeout(() => {
           const i = this.pollers.indexOf(res);
-          if (i > -1) { this.pollers.splice(i, 1); res(new Response(null, { status: 204 })); }
+          if (i > -1) {
+            this.pollers.splice(i, 1);
+            this.lastSeen = Date.now(); if (rid) this.runners.set(rid, this.lastSeen);
+            res(new Response(null, { status: 204 }));
+          }
         }, 15000);
       });
     }
@@ -213,6 +236,7 @@ export class Hub {
     if (p === "/result") {
       const { id, data } = await req.json();
       this.unlease(id);
+      if (this.vrun.delete(id)) this.flush(); // venice slot khali: queue me ruki agli job ko do
       const st = this.streams.get(id);
       if (st) { st.fin = true; st.data = data; st.wake?.(); }
       this.waiters.get(id)?.(data);
@@ -234,7 +258,12 @@ export class Hub {
       }
       return new Response("ok");
     }
-    if (p === "/progress-list") return Response.json({ now: Date.now(), jobs: [...this.progress.values()].reverse() });
+    if (p === "/progress-list") {
+      // queue me ruki venice jobs bhi dikhao (bot "queue me #N" / "server jaag raha hai" bata sake)
+      const now = Date.now(), alive = this.runnerAlive();
+      const q = this.queue.filter(j => j.provider === "venice").map((j, i) => ({ id: j.id, provider: "venice", ref: j.ref, started: j.at || now, stage: alive ? "queued" : "waking", pos: i + 1, ms: now - (j.at || now), updated: now, log: [] }));
+      return Response.json({ now, running: this.vrun.size, cap: this.veniceCap(), runners_alive: alive, jobs: [...q, ...[...this.progress.values()].reverse()] });
+    }
 
     if (p === "/ack") { const { id } = await req.json(); this.unlease(id); return new Response("ok"); }
 
@@ -258,7 +287,13 @@ export class Hub {
       return Response.json({ cancelled: !!c });
     }
 
-    if (p === "/status") return Response.json({ lastRequest: this.lastRequest });
+    if (p === "/status") {
+      // runner yahan "me" bhejta hai: kitne DOOSRE runner abhi sun rahe hain (handover: naya runner tayyar hone par hi purana jata hai)
+      const me = new URL(req.url).searchParams.get("me") || "", now = Date.now();
+      let others = 0;
+      for (const [id, t] of this.runners) { if (now - t > 25000) this.runners.delete(id); else if (id !== me) others++; }
+      return Response.json({ lastRequest: this.lastRequest, others });
+    }
 
     return new Response("not found", { status: 404 });
   }
@@ -291,11 +326,11 @@ export class Hub {
   }
 
   // job queue me daalo (+ zarurat ho to naya runner dispatch). { id, done } lautata hai
-  async enqueue(provider, body, name, stream) {
+  async enqueue(provider, body, name, stream, meta = {}) {
     const id = crypto.randomUUID();
     const done = new Promise(r => this.waiters.set(id, r));
     if (stream) this.streams.set(id, { chunks: [], last: -1, fin: false, data: null, wake: null });
-    this.queue.push({ id, provider, name, body, stream: !!stream });
+    this.queue.push({ id, provider, name, body, stream: !!stream, at: Date.now(), ref: meta && meta.ref ? String(meta.ref).slice(0, 40) : undefined });
     this.flush();
 
     // koi runner nahi sun raha -> naya run start karo
@@ -308,11 +343,12 @@ export class Hub {
     this.waiters.delete(id); this.streams.delete(id);
     const i = this.queue.findIndex(j => j.id === id);
     if (i > -1) this.queue.splice(i, 1);
+    if (this.vrun.delete(id)) this.flush(); // chal rahi venice job khatam / cancel / timeout: slot khali
   }
 
   // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
   // keyId diya ho aur provider venice ho: usi key ki pichhli chal rahi venice job khud-ba-khud cancel ho jati hai
-  async run(provider, body, waitMs, name, keyId) {
+  async run(provider, body, waitMs, name, keyId, meta = {}) {
     // Pehle har nayi venice request purani ko cancel kar deti thi (ek time par ek hi). Ab default me parallel chalti hain
     // (runner 3 pages tak sambhalta hai). Purana behaviour chahiye to env VENICE_CANCEL_PREV=1.
     const cancelPrev = this.env.VENICE_CANCEL_PREV === "1";
@@ -320,7 +356,7 @@ export class Hub {
       const prev = this.activeVenice.get(keyId);
       if (prev) { this.cancelled.add(prev); this.cleanup(prev); this.waiters.get(prev)?.(JSON.stringify({ error: "nayi request aayi, purani cancel", _jaat_kind: "cancelled" })); }
     }
-    const { id, done } = await this.enqueue(provider, body, name, false);
+    const { id, done } = await this.enqueue(provider, body, name, false, meta);
     if (cancelPrev && provider === "venice" && keyId) this.activeVenice.set(keyId, id);
     // Intezaar ke dauran watchdog: job queue me pada ho aur koi runner sun hi na raha ho to (dispatch fail / runner mar gaya)
     // har 15s me naya runner bulao. Pehle sirf pehli request par ek baar dispatch hota tha, fail hone par 260s tak atka rehta tha.
@@ -400,14 +436,18 @@ export class Hub {
   }
 
   flush() {
-    while (this.queue.length && this.pollers.length)
-      this.pollers.shift()(Response.json(this.lease(this.queue.shift())));
+    while (this.queue.length && this.pollers.length) {
+      const job = this.pickJob();
+      if (!job) break; // venice cap bhara hai: slot khali hone par (/result ya cleanup se) dobara flush hoga
+      this.pollers.shift()(Response.json(this.lease(job)));
+    }
   }
 
   // job runner ko diya; 4s me ack na aaye (runner mar chuka tha) to wapas queue me
   lease(job) {
     const timer = setTimeout(() => {
       if (!this.leased.delete(job.id)) return;
+      this.vrun.delete(job.id);
       if (this.waiters.has(job.id)) { this.queue.unshift(job); this.flush(); }
     }, 4000);
     this.leased.set(job.id, timer);
@@ -794,7 +834,7 @@ async function handle(req, env) {
       : pplx
       ? { provider: "perplexity", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
       : venice
-      ? { provider: "venice", model: j.model, keyId: g.id, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status !== false, ref: j.venice_ref ? String(j.venice_ref).slice(0, 40) : undefined }) }
+      ? { provider: "venice", model: j.model, keyId: g.id, ref: j.venice_ref ? String(j.venice_ref).slice(0, 40) : undefined, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status !== false, ref: j.venice_ref ? String(j.venice_ref).slice(0, 40) : undefined }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
@@ -825,7 +865,7 @@ async function handle(req, env) {
 
   if (["/next", "/result", "/ack", "/status", "/chunk", "/models", "/progress"].includes(u.pathname)) {
     if (auth !== env.RUNNER_SECRET) return new Response("no", { status: 401 });
-    return hub.fetch("https://hub" + u.pathname, { method: req.method, body: req.method === "POST" ? req.body : undefined });
+    return hub.fetch("https://hub" + u.pathname + u.search, { method: req.method, body: req.method === "POST" ? req.body : undefined, headers: { "x-runner-id": req.headers.get("x-runner-id") || "" } });
   }
   return new Response("ok");
 }
