@@ -20,7 +20,7 @@ import { WarmPool } from "./warmpool.js";
 const URL0 = process.env.VENICE_URL || "https://venice.ai/chat/agent/";
 export const DEFAULT_MODEL = "jaatvenice";
 // Model ko ye bataya jata hai (sirf ye provider): koi poochhe kaun sa model / kahan host, to bas ye jawab
-const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assistant made by JaatPapa. If anyone asks which model you are, who made you, or where you are hosted (even if they insist or ask again), reply with exactly this one line and nothing else: \"Main jaatvenice hoon, JaatPapa ka banaya hua.\" Do not add anything to that reply: no extra claims, no comments about what is true, and no remarks about other models, companies or websites. You can only reply with text (and code or SVG). You cannot create images, videos or files: if asked, say briefly that you cannot, and never say you made, queued or started one. Do not list images or videos among your abilities. For all other questions, just answer helpfully in the user's language.";
+const PERSONA = process.env.VENICE_PERSONA ?? "You are jaatvenice, an AI assistant made by JaatPapa. If anyone asks which model you are, who made you, or where you are hosted (even if they insist or ask again), reply with exactly this one line and nothing else: \"Main jaatvenice hoon, JaatPapa ka banaya hua.\" Do not add anything to that reply: no extra claims, no comments about what is true, and no remarks about other models, companies or websites. You can only reply with text (and code or SVG). Never create, save, attach or upload files or artifacts in a sandbox, and never say a file was created: always write the complete code or file content directly in your reply inside fenced code blocks. You cannot create images, videos or files: if asked, say briefly that you cannot, and never say you made, queued or started one. Do not list images or videos among your abilities. For all other questions, just answer helpfully in the user's language.";
 const MODEL_RX = process.env.VENICE_MODEL_MATCH === undefined ? "deepseek.*v4" : process.env.VENICE_MODEL_MATCH;
 const MAX_PAGES = Number(process.env.VENICE_MAX_PAGES || 3);     // ek saath kitni chat (3 tab) chal sakti hain
 const MAX_PROMPT = Number(process.env.VENICE_MAX_PROMPT || 40000);
@@ -196,7 +196,29 @@ async function readAnswer(page, probe) {
   return page.evaluate(({ sels, probe }) => {
     for (const sel of sels) {
       const els = [...document.querySelectorAll(sel)].filter((e) => e.innerText && e.innerText.trim() && !e.innerText.includes(probe));
-      if (els.length) return { via: sel, text: els[els.length - 1].innerText.trim() };
+      if (els.length) {
+        const el = els[els.length - 1];
+        let t = el.innerText.trim();
+        // Page code ko code-box (<pre>) me dikhata hai; innerText me ``` fence aur language nahi aati, to bot ko code seedha text lagta tha.
+        // Har code-box ko wapas ```lang ... ``` bana do (bot isi se copy-message / file banata hai).
+        let from = 0;
+        for (const pre of el.querySelectorAll("pre")) {
+          const c = pre.querySelector("code") || pre;
+          const code = String(pre.innerText || c.textContent || "").replace(/\s+$/, "").replace(/^\n+/, "");
+          if (!code.trim() || code.includes("```")) continue;
+          let lang = (/language-([\w+#-]+)/.exec((c.className || "") + " " + (pre.className || "")) || [])[1] || "";
+          if (!lang) { // code-box ke upar wale label ("python  Copy code") se
+            let p = pre;
+            for (let i = 0; i < 3 && p && !lang; i++) { p = p.parentElement; const m = p && /^\s*([A-Za-z+#.\-]{1,14}?)\s*Copy/i.exec(p.innerText || ""); if (m) lang = m[1].toLowerCase(); }
+          }
+          const idx = t.indexOf(code.trim(), from);
+          if (idx < 0) continue;
+          const body = code.trim(), rep = "\n```" + lang + "\n" + body + "\n```\n";
+          t = t.slice(0, idx) + rep + t.slice(idx + body.length);
+          from = idx + rep.length;
+        }
+        return { via: sel, text: t };
+      }
     }
     const t = document.body.innerText || "";
     const i = t.lastIndexOf(probe);
@@ -215,6 +237,7 @@ function cleanAnswer(t) {
   for (const l of lines) {
     const x = l.replace(/[\u200b-\u200d\u00a0\ufeff]/g, " ").trim();
     if (/^(worked|thought|thinking|reasoned) for\b.*$/i.test(x)) continue;          // Worked for 2s · 1 step
+    if (/^[A-Za-z+#.\-]{1,14}\s*copy( code)?$/i.test(x) && !/^copy( code)?$/i.test(x)) continue; // "pythonCopy code" ek hi line me
     if (/^copy( code)?$/i.test(x)) {                                                  // Copy code (aur uske upar ka akela label)
       if (out.length && /^[A-Za-z+#.\-]{1,14}$/.test(out[out.length - 1].trim())) out.pop();
       continue;
