@@ -57,14 +57,22 @@ async function lastRequestAgo() {
   } catch { return 0; }
 }
 
+// Agla runner dispatch. Pehle response dekha hi nahi jata tha: GitHub fail kare to chain chupchap tut jati thi
+// aur agli request ko 1-2 min cold-start jhelna padta tha. Ab 4 baar tak koshish (204 = accepted).
 async function dispatchNext() {
-  try {
-    await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/run.yml/dispatches`, {
-      method: "POST",
-      headers: { authorization: "Bearer " + process.env.GITHUB_TOKEN, accept: "application/vnd.github+json", "user-agent": "r" },
-      body: JSON.stringify({ ref: "main" }),
-    });
-  } catch {}
+  for (let i = 0; i < 4; i++) {
+    try {
+      const r = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/run.yml/dispatches`, {
+        method: "POST",
+        headers: { authorization: "Bearer " + process.env.GITHUB_TOKEN, accept: "application/vnd.github+json", "user-agent": "r" },
+        body: JSON.stringify({ ref: "main" }),
+      });
+      if (r.ok) return true;
+      console.log("dispatchNext fail:", r.status, (await r.text().catch(() => "")).slice(0, 120));
+    } catch (e) { console.log("dispatchNext error:", String((e && e.message) || e).slice(0, 100)); }
+    await sleep(2000 * (i + 1));
+  }
+  return false;
 }
 
 function callUpstream(body) {
@@ -154,7 +162,7 @@ async function handle({ id, provider, name, body, stream }) {
         const now = Date.now();
         if (p.stage === "generating" && now - lastP < 2000) return;
         lastP = now;
-        fetch(W + "/progress", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id, provider: "venice", ...p }) }).catch(() => {});
+        fetch(W + "/progress", { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ id, provider: "venice", ref: j.ref, ...p }) }).catch(() => {});
       };
       // har ~1.5s me worker se poochho: ye job cancel hui kya (dashboard/API se manually, ya nayi request aane se)
       const shouldStop = async () => {
@@ -207,7 +215,7 @@ while (true) {
 
   if (el > NEXT_AT_MS && !dispatched) {
     dispatched = true;
-    if ((await lastRequestAgo()) < IDLE_MS) await dispatchNext();
+    if ((await lastRequestAgo()) < IDLE_MS) { if (!(await dispatchNext())) dispatched = false; } // fail hua to agli loop me phir try
   }
   if (el > RUN_MS) break;
 

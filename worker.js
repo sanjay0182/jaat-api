@@ -224,12 +224,13 @@ export class Hub {
       const b = await req.json().catch(() => null);
       if (b && b.id) {
         const o = this.progress.get(b.id) || { id: b.id, provider: b.provider, started: Date.now(), log: [] };
+        if (b.ref) o.ref = String(b.ref).slice(0, 40); // client ka diya tag: bot apni job isse pehchanta hai
         o.stage = b.stage; o.ms = b.ms; o.updated = Date.now();
         if (b.chars != null) o.chars = b.chars;
         if (b.preview != null) o.preview = String(b.preview).slice(-200);
         if (b.stage !== "generating") { o.log.push({ stage: b.stage, ms: b.ms, detail: b.detail }); o.log = o.log.slice(-30); }
         this.progress.set(b.id, o);
-        while (this.progress.size > 10) this.progress.delete(this.progress.keys().next().value);
+        while (this.progress.size > 30) this.progress.delete(this.progress.keys().next().value);
       }
       return new Response("ok");
     }
@@ -262,6 +263,33 @@ export class Hub {
     return new Response("not found", { status: 404 });
   }
 
+  // GitHub Actions ka run.yml dispatch. true = GitHub ne accept kiya (204). Pehle response check hi nahi hota tha,
+  // isliye dispatch chupchap fail ho jaye (token/rate-limit/GitHub hiccup) to request 260s atki rehti thi.
+  async dispatchRunner() {
+    try {
+      const r = await fetch(`https://api.github.com/repos/${this.env.GH_REPO}/actions/workflows/run.yml/dispatches`, {
+        method: "POST",
+        headers: { authorization: "Bearer " + this.env.GH_PAT, accept: "application/vnd.github+json", "user-agent": "hub" },
+        body: JSON.stringify({ ref: "main" }),
+      });
+      if (r.status === 204 || r.ok) return true;
+      console.log("dispatch fail:", r.status, (await r.text().catch(() => "")).slice(0, 160));
+    } catch (e) { console.log("dispatch error:", String((e && e.message) || e).slice(0, 120)); }
+    return false;
+  }
+
+  // runner (GitHub) zinda nahi hai to naya shuru karo. Safe: baar-baar bulane par bhi cooldown ke andar dobara nahi chalta.
+  // Dispatch ho gaya to ~80s ruko (runner boot hota hai), fail hua to 8s baad dobara koshish.
+  async ensureRunner() {
+    const now = Date.now();
+    if (now - this.lastSeen <= 40000) return;
+    if (this.dispatching) return;
+    const cool = this.lastDispatchOk === false ? 8000 : 80000;
+    if (now - this.lastDispatch < cool) return;
+    this.dispatching = true; this.lastDispatch = now;
+    try { this.lastDispatchOk = await this.dispatchRunner(); } finally { this.dispatching = false; }
+  }
+
   // job queue me daalo (+ zarurat ho to naya runner dispatch). { id, done } lautata hai
   async enqueue(provider, body, name, stream) {
     const id = crypto.randomUUID();
@@ -271,17 +299,7 @@ export class Hub {
     this.flush();
 
     // koi runner nahi sun raha -> naya run start karo
-    const now = Date.now();
-    if (now - this.lastSeen > 40000 && now - this.lastDispatch > 60000) {
-      this.lastDispatch = now;
-      try {
-        await fetch(`https://api.github.com/repos/${this.env.GH_REPO}/actions/workflows/run.yml/dispatches`, {
-          method: "POST",
-          headers: { authorization: "Bearer " + this.env.GH_PAT, accept: "application/vnd.github+json", "user-agent": "hub" },
-          body: JSON.stringify({ ref: "main" }),
-        });
-      } catch {}
-    }
+    this.ensureRunner();
     return { id, done };
   }
 
@@ -295,15 +313,31 @@ export class Hub {
   // ek job queue me daalo, jawab ya timeout (null) ka intezaar karo
   // keyId diya ho aur provider venice ho: usi key ki pichhli chal rahi venice job khud-ba-khud cancel ho jati hai
   async run(provider, body, waitMs, name, keyId) {
-    if (provider === "venice" && keyId) {
+    // Pehle har nayi venice request purani ko cancel kar deti thi (ek time par ek hi). Ab default me parallel chalti hain
+    // (runner 3 pages tak sambhalta hai). Purana behaviour chahiye to env VENICE_CANCEL_PREV=1.
+    const cancelPrev = this.env.VENICE_CANCEL_PREV === "1";
+    if (cancelPrev && provider === "venice" && keyId) {
       const prev = this.activeVenice.get(keyId);
       if (prev) { this.cancelled.add(prev); this.cleanup(prev); this.waiters.get(prev)?.(JSON.stringify({ error: "nayi request aayi, purani cancel", _jaat_kind: "cancelled" })); }
     }
     const { id, done } = await this.enqueue(provider, body, name, false);
-    if (provider === "venice" && keyId) this.activeVenice.set(keyId, id);
-    const out = await Promise.race([done, new Promise(r => setTimeout(() => r(null), waitMs))]);
+    if (cancelPrev && provider === "venice" && keyId) this.activeVenice.set(keyId, id);
+    // Intezaar ke dauran watchdog: job queue me pada ho aur koi runner sun hi na raha ho to (dispatch fail / runner mar gaya)
+    // har 15s me naya runner bulao. Pehle sirf pehli request par ek baar dispatch hota tha, fail hone par 260s tak atka rehta tha.
+    const end = Date.now() + waitMs;
+    let out = null;
+    for (;;) {
+      const left = end - Date.now();
+      if (left <= 0) break;
+      let timer;
+      const tick = new Promise(r => { timer = setTimeout(() => r(undefined), Math.min(15000, left)); });
+      const v = await Promise.race([done, tick]);
+      clearTimeout(timer);
+      if (v !== undefined) { out = v; break; }
+      if (this.queue.some(j => j.id === id)) this.ensureRunner(); // abhi tak kisi runner ne uthayi hi nahi
+    }
     this.cleanup(id); this.cancelled.delete(id);
-    if (provider === "venice" && keyId && this.activeVenice.get(keyId) === id) this.activeVenice.delete(keyId);
+    if (cancelPrev && provider === "venice" && keyId && this.activeVenice.get(keyId) === id) this.activeVenice.delete(keyId);
     return out;
   }
 
@@ -382,8 +416,8 @@ export class Hub {
   unlease(id) { clearTimeout(this.leased.get(id)); this.leased.delete(id); }
 }
 
-// ---- venice files: photo/pdf/txt... (message ke saath ya akele). zip + video band, sab mila ke max 10MB ----
-const VFILE_MAX = 10 * 1024 * 1024, VFILE_MAX_N = 10;
+// ---- venice files: photo/pdf/txt... (message ke saath ya akele). zip + video band, sab mila ke max 15MB ----
+const VFILE_MAX = 15 * 1024 * 1024, VFILE_MAX_N = 10;
 const BLOCK_EXT = /\.(zip|rar|7z|tar|gz|tgz|bz2|xz|mp4|mov|mkv|avi|webm|flv|wmv|m4v|mpg|mpeg|3gp)$/i;
 const BLOCK_MIME = /^(video\/|application\/(zip|x-zip-compressed|x-rar-compressed|vnd\.rar|x-7z-compressed|gzip|x-gzip|x-tar|x-bzip2|x-xz))/i;
 function extractVeniceFiles(messages) {
@@ -429,7 +463,7 @@ function extractVeniceFiles(messages) {
       if (BLOCK_EXT.test(name) || BLOCK_MIME.test(mime)) return bad("zip / video files allowed nahi hain: " + name);
       total += Math.floor(b64.length * 3 / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
       if (files.length >= VFILE_MAX_N) return bad("max " + VFILE_MAX_N + " files");
-      if (total > VFILE_MAX) return bad("files ka total size 10MB se zyada hai", 413);
+      if (total > VFILE_MAX) return bad("files ka total size 15MB se zyada hai", 413);
       files.push({ name, mime, b64 });
     }
     out.push({ ...m, content: texts.join("\n") });
@@ -760,7 +794,7 @@ async function handle(req, env) {
       : pplx
       ? { provider: "perplexity", model: j.model, body: JSON.stringify({ model: j.model, messages: j.messages || [] }) }
       : venice
-      ? { provider: "venice", model: j.model, keyId: g.id, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status !== false }) }
+      ? { provider: "venice", model: j.model, keyId: g.id, body: JSON.stringify({ model: j.model, messages: vm, files: vf, venice_status: j.venice_status !== false, ref: j.venice_ref ? String(j.venice_ref).slice(0, 40) : undefined }) }
       : { provider: "jaat", body: jaatBody() };
 
     const r = await hub.fetch("https://hub/submit", { method: "POST", body: JSON.stringify(job) });
