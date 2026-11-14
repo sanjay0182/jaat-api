@@ -36,9 +36,23 @@ const SEL = {
 // cookie / login / "continue" popups jo input ko dhak sakte hain
 async function dismissPopups(page) {
   try { await page.keyboard.press("Escape"); } catch {}
+  await closeCross(page);
   for (const name of [/^accept( all)?$/i, /^i agree$/i, /^got it$/i, /^continue as guest$/i, /^stay logged out$/i, /^maybe later$/i, /^close$/i, /^skip$/i]) {
     try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 1500 }); } catch {}
   }
+}
+// sign up / login popup ka cross (X): popup ke andar ka close button turant dabao. Kabhi error nahi fenkta.
+const CROSS_SEL = [
+  '[role="dialog"] button[aria-label*="close" i]', '[role="dialog"] button[aria-label*="dismiss" i]',
+  '[aria-modal="true"] button[aria-label*="close" i]', '[aria-modal="true"] button[aria-label*="dismiss" i]',
+  'button[aria-label="Close" i]', 'button[aria-label*="close" i][class*="modal" i]', '[data-testid*="close" i]', '[data-testid*="dismiss" i]',
+].join(", ");
+async function closeCross(page) {
+  try {
+    const b = page.locator(CROSS_SEL).first();
+    if (await b.count()) { await b.click({ timeout: 800 }); return true; }
+  } catch {}
+  return false;
 }
 // Cloudflare "Just a moment..." challenge: kuch der ruko (headed Chrome me aksar khud paas ho jata hai),
 // aur turnstile checkbox dikhe to use click karo. True = page aage badh gaya.
@@ -210,7 +224,10 @@ export class PplxClient {
       const ver = this.browser.version();
       const ua = process.env.PPLX_UA ||
         `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Safari/537.36`;
-      this.ctx = await this.browser.newContext({ userAgent: ua, locale: "en-US", viewport: { width: 1280, height: 800 } });
+      // Perplexity sirf phone (Android Chrome) jaisa chalta hai, desktop nahi.
+      const mobileUA = process.env.PPLX_UA ||
+        `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Mobile Safari/537.36`;
+      this.ctx = await this.browser.newContext({ userAgent: mobileUA, locale: "en-US", viewport: { width: 412, height: 915 }, screen: { width: 412, height: 915 }, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true });
       await this.ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} });
       console.log("pplx: chrome ready", ver, headless ? "(headless)" : "(headed)");
     })().catch((e) => { this.starting = null; throw e; });
@@ -275,17 +292,19 @@ export class PplxClient {
       page.on("response", async (r) => {
         try { if (/perplexity_ask/.test(r.url()) && r.request().method() === "POST") sse = await r.text(); } catch {}
       });
+      await closeCross(page); // popup ka cross pehle hata do, warna input dhak sakta hai
       await box.click();
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
       await page.keyboard.press("Enter");
 
       // jawab aane tak ruko: SSE mile ya DOM me text thehar jaye
-      let last = "", stable = 0, started = false;
+      let last = "", stable = 0, started = false, tick = 0;
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
         if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); await this.guard(net, page); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
+        if (++tick % 4 === 0) await closeCross(page); // sign up popup beech me aaye to uska cross turant dabao
         await hideChips(page);
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
