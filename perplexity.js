@@ -44,7 +44,7 @@ async function dismissPopups(page) {
 }
 // Phone par input ke upar fixed overlays aate hain: "Search like never before / better in the app" (X bina label ka),
 // cookie banner, login popup, "This session is private". Ye click rok dete hain (log: submit button fail: Timeout exceeded).
-// Inhe seedha DOM se hata do, aur popup ke lagaye pointer-events/inert/scroll-lock bhi khol do. Kabhi error nahi fenkta.
+// Inhe CSS se chhupa do (DOM se remove() KABHI nahi: React ka node hatane par page "Internal Error" ho jata hai), aur popup ke lagaye pointer-events/inert/scroll-lock bhi khol do. Kabhi error nahi fenkta.
 async function nukeOverlays(page) {
   try {
     return await page.evaluate(() => {
@@ -62,7 +62,7 @@ async function nukeOverlays(page) {
         const txt = (el.innerText || "").trim();
         const full = r.width >= vw * 0.9 && r.height >= vh * 0.9;
         const blocker = !txt && full && cs.zIndex !== "auto" && cs.pointerEvents !== "none"; // khali full-screen parda
-        if ((txt && bad.test(txt)) || blocker) { gone.push(el.tagName.toLowerCase() + ":" + (txt || "(khali parda)").replace(/\s+/g, " ").slice(0, 40)); el.remove(); n++; }
+        if ((txt && bad.test(txt)) || blocker) { gone.push(el.tagName.toLowerCase() + ":" + (txt || "(khali parda)").replace(/\s+/g, " ").slice(0, 40)); el.style.setProperty("display", "none", "important"); n++; }
       }
       document.body.style.pointerEvents = "";
       document.body.style.overflow = "";
@@ -89,13 +89,16 @@ async function killCookieBanner(page) {
     if (await btn.count()) { try { await btn.click({ timeout: 1500 }); } catch {} }
     await page.waitForTimeout(250);
     if (await dlg.count()) {
-      await page.evaluate(() => { document.querySelectorAll('[role="dialog"]').forEach((d) => { if (/cookie|pixels|sign up|log ?in|create (an )?account|continue with/i.test(d.innerText || "")) d.remove(); }); });
+      await page.evaluate(() => { document.querySelectorAll('[role="dialog"]').forEach((d) => { if (/cookie|pixels|sign up|log ?in|create (an )?account|continue with/i.test(d.innerText || "")) d.style.setProperty("display", "none", "important"); }); });
       return true;
     }
     return true;
   } catch { return false; }
 }
 async function closeCross(page) {
+  for (const name of [/^got it$/i, /^decline optional$/i]) { // cookie banner ka asli button pehle (React khud hata leta hai)
+    try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 800 }); } catch {}
+  }
   const killed = await nukeOverlays(page);
   if (await killCookieBanner(page)) return true;
   if (killed) return true;
