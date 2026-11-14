@@ -33,105 +33,225 @@ const SEL = {
   stop: 'button[aria-label*="Stop" i]',
 };
 
-// cookie / login / "continue" popups jo input ko dhak sakte hain
-async function dismissPopups(page) {
-  try { await page.keyboard.press("Escape"); } catch {}
-  await closeCross(page);
-  for (const name of [/^accept( all)?$/i, /^i agree$/i, /^got it$/i, /^decline optional$/i, /^continue as guest$/i, /^stay logged out$/i, /^maybe later$/i, /^close$/i, /^skip$/i]) {
-    try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 1500 }); } catch {}
+// =====================================================================================
+// AUTOPILOT - page ko insaan ki tarah chalao: dekho (snapshot) -> socho -> asli tap -> check karo.
+// Koi popup ka naam/selector pehle se pata hona zaroori nahi:
+//   * "composer (input box) ke beech me elementFromPoint kya hai?" - agar input khud nahi, to jo upar baitha hai wahi overlay hai.
+//   * us overlay ke buttons me se: pehle Got it/Accept, phir Decline/OK, phir Close/Skip, phir bina-text wala X (upar-daayen).
+//     (sign up / log in / continue with... wale buttons kabhi nahi dabte)
+//   * har button ek hi baar dabta hai; kuch na bache to Escape, phir CSS se chhupana (DOM se remove() kabhi nahi - React crash hota hai).
+//   * Cloudflare challenge / "Internal Error" page ho to khud sambhalta hai.
+// Har step log me aata hai ("pplx auto: ...") taaki dikhe bot ne kya socha aur kya dabaya.
+// =====================================================================================
+const POS_RANK = [
+  /^(got it|accept( all)?( cookies)?|i agree|agree|allow all)$/i,
+  /^(ok|okay|decline( optional)?|reject( all)?( optional)?|necessary only)$/i,
+  /^(close|dismiss|skip|not now|maybe later|no,? thanks|later|continue as guest|stay logged out|cancel|x|\u00d7|\u2715)$/i,
+];
+const NEG_BTN = /sign ?up|sign ?in|log ?in|continue with|google|apple|e-?mail|download|install|open in app|get the app|upgrade|subscribe|share|buy/i;
+const BLOCK_TXT = /better in the app|search like never before|cookie|pixels|sign in to continue|sign up|log ?in\b|create (an )?account|continue with (google|apple|email)|this session is private|single sign-on|sign in if you are/i;
+
+// page ke andar chalta hai (page.evaluate) - sirf padhta hai, kuch badalta nahi
+function SNAP(blockSrc) {
+  const BLOCK = new RegExp(blockSrc, "i");
+  const inputSel = '#ask-input, [data-lexical-editor="true"], div[contenteditable="true"][role="textbox"], div[contenteditable="true"], [role="textbox"], textarea';
+  const vw = innerWidth, vh = innerHeight;
+  const cs = (e) => getComputedStyle(e);
+  const vis = (e) => { const r = e.getBoundingClientRect(), c = cs(e); return r.width > 2 && r.height > 2 && c.visibility !== "hidden" && c.display !== "none" && c.opacity !== "0" && r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw; };
+  const lab = (e) => ((e.getAttribute("aria-label") || "") + " " + (e.innerText || "") + " " + (e.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+  const body = (document.body && document.body.innerText) || "";
+  const ed = Array.from(document.querySelectorAll(inputSel)).filter(vis)[0] || null;
+  const binfo = (b) => { const r = b.getBoundingClientRect(); const t = (b.innerText || "").replace(/\s+/g, " ").trim(); return { label: t || (b.getAttribute("aria-label") || b.getAttribute("title") || "").trim(), icon: !t, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: Math.round(r.width), h: Math.round(r.height), right: Math.round(r.right), top: Math.round(r.top), dis: !!b.disabled || b.getAttribute("aria-disabled") === "true" }; };
+  const btnsIn = (el) => Array.from(el.querySelectorAll('button, [role="button"]')).filter(vis).map(binfo);
+  const out = { url: location.href, title: document.title, body: body.replace(/\s+/g, " ").slice(0, 140), err: !ed && /internal error|something went wrong/i.test(body.slice(0, 300)), composer: null, overlays: [], cbtns: [] };
+  let culprit = null;
+  if (ed) {
+    const r = ed.getBoundingClientRect();
+    const cx = Math.round(Math.min(vw - 3, Math.max(3, r.left + r.width / 2)));
+    const cy = Math.round(Math.min(vh - 3, Math.max(3, r.top + Math.min(r.height / 2, 30))));
+    const hit = document.elementFromPoint(cx, cy);
+    const covered = !!hit && !(hit === ed || ed.contains(hit) || hit.contains(ed));
+    out.composer = { x: cx, y: cy, covered, by: covered ? hit.tagName.toLowerCase() + ":" + lab(hit).slice(0, 40) : "", text: (((ed.innerText || ed.value || "") + "")).trim().length };
+    if (covered) {
+      for (let n = hit; n && n !== document.body && n !== document.documentElement; n = n.parentElement) { const p = cs(n).position; if ((p === "fixed" || p === "absolute") && !n.contains(ed)) culprit = n; }
+      if (!culprit) culprit = hit;
+    }
+    let el = ed, list = [];
+    for (let i = 0; i < 7 && el; i++, el = el.parentElement) { list = Array.from(el.querySelectorAll('button, [role="button"]')).filter(vis); if (list.length >= 2) break; }
+    out.cbtns = list.map(binfo);
   }
-  await nukeOverlays(page); // button se na hate (ya bina label ka X ho) to seedha DOM se hatao
+  const seen = new Set();
+  const consider = (el) => {
+    if (seen.has(el) || !vis(el) || (ed && el.contains(ed))) return;
+    seen.add(el);
+    const r = el.getBoundingClientRect();
+    if (r.width < vw * 0.4 || r.height < 24) return;
+    const t = lab(el);
+    const full = r.width >= vw * 0.9 && r.height >= vh * 0.9;
+    const mine = el === culprit || (culprit && (culprit.contains(el) || el.contains(culprit)));
+    const blocking = !!mine || (BLOCK.test(t) && r.height >= 120) || (full && cs(el).zIndex !== "auto");
+    out.overlays.push({ text: t.slice(0, 90), blocking, buttons: btnsIn(el).slice(0, 14), w: Math.round(r.width), h: Math.round(r.height) });
+  };
+  if (culprit) consider(culprit);
+  document.querySelectorAll('[role="dialog"], [aria-modal="true"]').forEach(consider);
+  document.querySelectorAll("body *").forEach((el) => { if (cs(el).position === "fixed") consider(el); });
+  return out;
 }
-// Phone par input ke upar fixed overlays aate hain: "Search like never before / better in the app" (X bina label ka),
-// cookie banner, login popup, "This session is private". Ye click rok dete hain (log: submit button fail: Timeout exceeded).
-// Inhe CSS se chhupa do (DOM se remove() KABHI nahi: React ka node hatane par page "Internal Error" ho jata hai), aur popup ke lagaye pointer-events/inert/scroll-lock bhi khol do. Kabhi error nahi fenkta.
-async function nukeOverlays(page) {
+
+const alog = (...a) => console.log("pplx auto:", ...a);
+const snap = (page) => page.evaluate(SNAP, BLOCK_TXT.source).catch(() => null);
+async function tap(page, x, y) { // asli touch tap (phone jaisa); na chale to mouse click
+  try { await page.touchscreen.tap(x, y); } catch { try { await page.mouse.click(x, y); } catch {} }
+}
+function rankBtn(b) {
+  if (b.dis || b.w < 8 || b.h < 8) return null;
+  if (NEG_BTN.test(b.label) && !/^(got it|accept)/i.test(b.label)) return null;
+  if (!b.icon) { for (let i = 0; i < POS_RANK.length; i++) if (POS_RANK[i].test(b.label)) return i; return null; }
+  if (/close|dismiss|cancel/i.test(b.label)) return 3;
+  if (b.label && !/back|x\b/i.test(b.label)) return null; // naam wala icon-button jo close nahi hai (menu, mic...) mat chhuo
+  return 4 + b.top / 10000 + (2000 - b.right) / 1e7; // bina naam ka icon: sabse upar-daayen = X
+}
+// CSS se chhupana (aakhri raasta). DOM se remove() nahi.
+async function hideBlockers(page, x, y) {
   try {
-    return await page.evaluate(() => {
+    return await page.evaluate(([bs, px, py]) => {
+      const BLOCK = new RegExp(bs, "i");
       const inputSel = '#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea';
-      const bad = /better in the app|open in app|get the app|download the app|cookie|pixels, sdks|sign up|log ?in\b|create (an )?account|continue with (google|apple|email)|this session is private|decline optional|single sign-on/i;
-      const vw = window.innerWidth, vh = window.innerHeight;
-      let n = 0; const gone = [];
-      for (const el of Array.from(document.querySelectorAll("body *"))) {
-        if (!el.isConnected || el.matches("html, body, script, style")) continue;
-        const cs = getComputedStyle(el);
-        if (cs.position !== "fixed") continue;
-        if (el.matches(inputSel) || el.querySelector(inputSel)) continue; // composer (input wala) kabhi nahi hatana
-        const r = el.getBoundingClientRect();
-        if (r.width < vw * 0.4 || r.height < 30) continue;
-        const txt = (el.innerText || "").trim();
-        const full = r.width >= vw * 0.9 && r.height >= vh * 0.9;
-        const blocker = !txt && full && cs.zIndex !== "auto" && cs.pointerEvents !== "none"; // khali full-screen parda
-        if ((txt && bad.test(txt)) || blocker) { gone.push(el.tagName.toLowerCase() + ":" + (txt || "(khali parda)").replace(/\s+/g, " ").slice(0, 40)); el.style.setProperty("display", "none", "important"); n++; }
+      const hide = (el) => { el.style.setProperty("display", "none", "important"); };
+      let n = 0;
+      const top = document.elementFromPoint(px, py);
+      for (let el = top; el && el !== document.body; el = el.parentElement) {
+        const p = getComputedStyle(el).position;
+        if ((p === "fixed" || p === "absolute") && !el.querySelector(inputSel) && !el.matches(inputSel)) { hide(el); n++; break; }
       }
-      document.body.style.pointerEvents = "";
-      document.body.style.overflow = "";
-      document.documentElement.style.overflow = "";
-      document.body.removeAttribute("data-scroll-locked");
+      for (const el of Array.from(document.querySelectorAll("body *"))) {
+        if (getComputedStyle(el).position !== "fixed" || el.querySelector(inputSel) || el.matches(inputSel)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width >= innerWidth * 0.4 && r.height >= 120 && BLOCK.test(el.innerText || "")) { hide(el); n++; }
+      }
+      document.body.style.pointerEvents = ""; document.body.style.overflow = ""; document.documentElement.style.overflow = "";
       document.querySelectorAll("[inert]").forEach((e) => e.removeAttribute("inert"));
-      document.querySelectorAll('body > [aria-hidden="true"]').forEach((e) => { if (e.querySelector(inputSel)) e.removeAttribute("aria-hidden"); });
-      return gone;
-    }).then((g) => { if (g && g.length) console.log("pplx: overlay hataye:", g.join(" | ")); return g ? g.length : 0; });
+      return n;
+    }, [BLOCK_TXT.source, x || 200, y || 400]);
   } catch { return 0; }
 }
-// sign up / login popup ka cross (X): popup ke andar ka close button turant dabao. Kabhi error nahi fenkta.
-const CROSS_SEL = [
-  '[role="dialog"] button[aria-label*="close" i]', '[role="dialog"] button[aria-label*="dismiss" i]',
-  '[aria-modal="true"] button[aria-label*="close" i]', '[aria-modal="true"] button[aria-label*="dismiss" i]',
-  'button[aria-label="Close" i]', 'button[aria-label*="close" i][class*="modal" i]', '[data-testid*="close" i]', '[data-testid*="dismiss" i]',
-].join(", ");
-// cookie / sign up banner (role=dialog, fixed, input ke upar aa jata hai aur click rok deta hai): button dabao, na hate to DOM se hata do
-async function killCookieBanner(page) {
-  try {
-    const dlg = page.locator('[role="dialog"]');
-    if (!(await dlg.count())) return false;
-    const btn = dlg.getByRole("button", { name: /accept|agree|allow|reject|decline|necessary|got it|^ok$|close|dismiss|not now|maybe later/i }).first();
-    if (await btn.count()) { try { await btn.click({ timeout: 1500 }); } catch {} }
-    await page.waitForTimeout(250);
-    if (await dlg.count()) {
-      await page.evaluate(() => { document.querySelectorAll('[role="dialog"]').forEach((d) => { if (/cookie|pixels|sign up|log ?in|create (an )?account|continue with/i.test(d.innerText || "")) d.style.setProperty("display", "none", "important"); }); });
-      return true;
+
+// ek kadam: dekho, aur zaroorat ho to ek kaam karo. opts.sweep = jawab ke intezaar me: reload/challenge mat chhedo.
+async function autoStep(page, st, opts = {}) {
+  const s = await snap(page);
+  if (!s) return { s: null };
+  if (!opts.sweep) {
+    if (/just a moment|attention required|security verification/i.test(s.title) || /performing security verification|verify you are human/i.test(s.body)) {
+      alog("cloudflare challenge, intezaar"); await passChallenge(page); return { s, acted: true };
     }
-    return true;
-  } catch { return false; }
-}
-// "Search like never before / It's better in the app" screen ka X: insaan ki tarah asli tap karo (sirf chhupane se app ki state nahi badalti)
-async function closePromo(page) {
-  try {
-    const found = await page.evaluate(() => {
-      const vw = innerWidth;
-      for (const el of Array.from(document.querySelectorAll("body *"))) {
-        const cs = getComputedStyle(el);
-        if (cs.position !== "fixed" || cs.display === "none") continue;
-        if (!/better in the app|search like never before/i.test(el.innerText || "")) continue;
-        if (el.getBoundingClientRect().width < vw * 0.5) continue;
-        const btns = Array.from(el.querySelectorAll("button, [role=button]")).filter((b) => b.offsetParent !== null && !(b.innerText || "").trim());
-        btns.sort((a, b) => { const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect(); return (ra.top - rb.top) || (rb.right - ra.right); }); // sabse upar-daayen = X
-        if (btns[0]) { btns[0].setAttribute("data-pplx-x", "1"); return true; }
-      }
-      return false;
-    });
-    if (!found) return false;
-    await page.locator('[data-pplx-x="1"]').first().click({ timeout: 1500 });
-    console.log("pplx: app-promo ka X dabaya");
-    await page.waitForTimeout(400);
-    return true;
-  } catch { return false; }
-}
-async function closeCross(page) {
-  for (const name of [/^got it$/i, /^decline optional$/i]) { // cookie banner ka asli button pehle (React khud hata leta hai)
-    try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 800 }); } catch {}
+    if (s.err) {
+      if ((st.reloads = (st.reloads || 0) + 1) <= 2) { alog("Internal Error page -> reload (" + st.reloads + ")"); await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {}); await page.waitForTimeout(1200); return { s, acted: true }; }
+      return { s, fail: "internal-error page" };
+    }
   }
-  await closePromo(page); // cookie ke baad wala promo screen: uska X asli tap se
-  const killed = await nukeOverlays(page);
-  if (await killCookieBanner(page)) return true;
-  if (killed) return true;
-  try {
-    const b = page.locator(CROSS_SEL).first();
-    if (await b.count()) { await b.click({ timeout: 800 }); return true; }
-  } catch {}
+  const blocking = s.overlays.filter((o) => o.blocking);
+  if (s.composer && !s.composer.covered && !blocking.length) return { s, ready: true };
+  if (!blocking.length) {
+    if (s.composer && s.composer.covered) { // koi bada overlay nahi mila par input dhaka hai: us point ko seedha chhupao
+      alog("input dhaka hai (" + s.composer.by + ") -> chhupa raha hu"); await hideBlockers(page, s.composer.x, s.composer.y); return { s, acted: true };
+    }
+    return { s, acted: false }; // input abhi aaya nahi (page load ho raha hai)
+  }
+  const ov = blocking[0];
+  const cands = ov.buttons.map((b) => ({ b, r: rankBtn(b) })).filter((c) => c.r !== null).sort((a, b) => a.r - b.r);
+  const key = (b) => b.label + "@" + b.x + "," + b.y;
+  const next = cands.find((c) => !st.tried.has(key(c.b)));
+  if (next) {
+    st.tried.add(key(next.b));
+    alog('overlay "' + ov.text.slice(0, 40) + '" -> tap "' + (next.b.label || "icon X") + '" @' + next.b.x + "," + next.b.y);
+    await tap(page, next.b.x, next.b.y); await page.waitForTimeout(700);
+    return { s, acted: true };
+  }
+  if (!st.esc) { st.esc = 1; alog("koi button nahi bacha -> Escape"); await page.keyboard.press("Escape").catch(() => {}); await page.waitForTimeout(400); return { s, acted: true }; }
+  if ((st.hid = (st.hid || 0) + 1) <= 4) {
+    alog('overlay "' + ov.text.slice(0, 40) + '" -> CSS se chhupa raha hu');
+    const n = await hideBlockers(page, s.composer ? s.composer.x : 200, s.composer ? s.composer.y : 400);
+    await page.waitForTimeout(300); return { s, acted: n > 0 };
+  }
+  return { s, fail: "overlay hat nahi raha: " + ov.text.slice(0, 50) };
+}
+
+// page ko tab tak sambhalo jab tak input box saaf-saaf (bina dhake) tap karne layak na ho
+async function autoPrepare(page, maxMs = 20000) {
+  const st = { tried: new Set() }, end = Date.now() + maxMs;
+  let n = 0, last = null;
+  while (Date.now() < end) {
+    const r = await autoStep(page, st); n++;
+    if (r.s) last = r.s;
+    if (r.ready) { if (n > 1) alog("page tayyar (" + n + " kadam)"); return true; }
+    if (r.fail) { alog("fail:", r.fail); break; }
+    if (!r.acted) await page.waitForTimeout(600);
+  }
+  if (last) alog("prepare adhura | composer=" + JSON.stringify(last.composer) + " | overlays=" + (last.overlays.map((o) => (o.blocking ? "*" : "") + o.text.slice(0, 30)).join(" | ") || "koi nahi"));
   return false;
 }
+
+// kya search/jawab shuru ho gaya (url /search|/session, SSE, stop button ya answer block)
+async function startedNow(page, getSse) {
+  if (getSse && getSse()) return true;
+  if (/\/(search|session)\//.test(page.url())) return true;
+  if (await page.locator(SEL.stop).count().catch(() => 0)) return true;
+  return (await page.locator(SEL.answer).count().catch(() => 0)) > 0;
+}
+async function waitStarted(page, getSse, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (await startedNow(page, getSse)) return true; await page.waitForTimeout(250); }
+  return false;
+}
+
+// prompt daalo: tap -> focus pakka karo -> insertText -> (box khali ho to) execCommand -> (phir bhi to) keyboard.type. Kitna text gaya wo lautata hai.
+async function typePrompt(page, prompt) {
+  let s = await snap(page);
+  if (!s || !s.composer) return 0;
+  await tap(page, s.composer.x, s.composer.y); await page.waitForTimeout(300);
+  const focused = () => page.evaluate(() => { const a = document.activeElement; return !!a && a !== document.body && (a.isContentEditable || /^(textarea|input)$/i.test(a.tagName) || !!a.closest('[contenteditable="true"]')); }).catch(() => false);
+  if (!(await focused())) {
+    try { await page.mouse.click(s.composer.x, s.composer.y); } catch {}
+    await page.waitForTimeout(250);
+    if (!(await focused())) await page.evaluate(() => { const e = document.querySelector('#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea'); if (e) e.focus(); }).catch(() => {});
+  }
+  const want = Math.min(prompt.length, 40);
+  const len = async () => { const t = await snap(page); return t && t.composer ? t.composer.text : 0; };
+  await page.keyboard.insertText(prompt); await page.waitForTimeout(250);
+  let n = await len(); if (n >= want) return n;
+  alog("insertText se box khali (" + n + ") -> execCommand try");
+  await page.evaluate((t) => { const e = document.querySelector('#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea'); if (!e) return; e.focus(); if (e.isContentEditable) document.execCommand("insertText", false, t); else { e.value = t; e.dispatchEvent(new Event("input", { bubbles: true })); } }, prompt).catch(() => {});
+  await page.waitForTimeout(250); n = await len(); if (n >= want) return n;
+  alog("execCommand se bhi khali (" + n + ") -> keyboard.type");
+  await page.keyboard.type(prompt.slice(0, 3000), { delay: 0 }); await page.waitForTimeout(250);
+  return await len();
+}
+
+// bhejo: Enter -> (na gaya to) composer ke buttons ek-ek asli tap -> har baar check; beech me overlay aaye to hatao. Kaise gaya wo lautata hai ("" = nahi gaya).
+async function sendPrompt(page, getSse) {
+  await page.keyboard.press("Enter");
+  if (await waitStarted(page, getSse, 1600)) return "Enter";
+  const st = { tried: new Set() };
+  for (let round = 0; round < 3; round++) {
+    const s = await snap(page);
+    if (!s) break;
+    if (s.overlays.some((o) => o.blocking)) { alog("bhejte waqt overlay aaya -> hata raha hu"); await autoStep(page, st, { sweep: true }); continue; }
+    if (s.composer && s.composer.text === 0) { alog("bhejne se pehle box khali ho gaya"); return ""; }
+    const skip = /attach|add|upload|mic|voice|dictat|model|mode|focus|source|plus|more|menu|\+/i;
+    const lab = (b) => b.label || "";
+    const c = (s.cbtns || []).filter((b) => !b.dis && b.w >= 16).filter((b) => /send|submit|ask/i.test(lab(b)) || !skip.test(lab(b)));
+    c.sort((a, b) => (/send|submit|ask/i.test(lab(b)) ? 1 : 0) - (/send|submit|ask/i.test(lab(a)) ? 1 : 0) || (b.right - a.right) || (b.y - a.y)); // send-label pehle, phir sabse daayen
+    alog("composer buttons: " + ((s.cbtns || []).map((b) => (b.label || "icon") + (b.dis ? "(off)" : "") + "@" + b.x + "," + b.y).join(" | ") || "koi nahi"));
+    for (const b of c.slice(0, 3)) {
+      await tap(page, b.x, b.y);
+      if (await waitStarted(page, getSse, 1800)) return "tap " + (b.label || "icon") + "@" + b.x + "," + b.y;
+    }
+    await page.keyboard.press("Enter").catch(() => {});
+    if (await waitStarted(page, getSse, 1200)) return "Enter-dobara";
+  }
+  return "";
+}
+
 // Cloudflare "Just a moment..." challenge: kuch der ruko (headed Chrome me aksar khud paas ho jata hai),
 // aur turnstile checkbox dikhe to use click karo. True = page aage badh gaya.
 async function passChallenge(page, ms = 45000) {
@@ -208,46 +328,6 @@ async function topLog(page, tag) {
     console.log("pplx top [" + tag + "]: title=" + title + " | text: " + i.text + " | upar/30%/60%/neeche: " + i.top.join(" || ") + " | fixed: " + (i.fixed.join(" || ") || "-"));
   } catch {}
 }
-// prompt box me text gaya ya nahi (Lexical editor kabhi insertText nahi pakadta)
-async function boxText(page, box) {
-  try { return ((await box.innerText({ timeout: 1500 }).catch(() => "")) || (await box.inputValue({ timeout: 1500 }).catch(() => "")) || "").trim(); } catch { return ""; }
-}
-// kya jawab/search shuru ho gaya (url /search|/session, SSE, stop button ya answer block)
-async function startedNow(page, getSse) {
-  if (getSse && getSse()) return true;
-  if (/\/(search|session)\//.test(page.url())) return true;
-  if (await page.locator(SEL.stop).count().catch(() => 0)) return true;
-  return (await page.locator(SEL.answer).count().catch(() => 0)) > 0;
-}
-// send button dabao. Composer ke saare buttons log me dikhata hai, phir ek-ek asli click karke dekhta hai ki submit hua ya nahi
-async function trySubmit(page, box, getSse) {
-  await nukeOverlays(page);
-  const cands = await page.evaluate(() => {
-    const ed = document.querySelector('#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea');
-    if (!ed) return [];
-    let el = ed, btns = [];
-    for (let i = 0; i < 7 && el; i++, el = el.parentElement) {
-      btns = Array.from(el.querySelectorAll("button")).filter((b) => b.offsetParent !== null);
-      if (btns.length >= 2) break;
-    }
-    document.querySelectorAll("[data-pplx-b]").forEach((b) => b.removeAttribute("data-pplx-b"));
-    // pehle submit/send label wale, phir baaki aakhri se pehle (mic ke baad wala arrow aakhri hota hai)
-    const lab = (b) => (b.getAttribute("aria-label") || "") + " " + (b.innerText || "");
-    const rank = (b) => (/submit|send/i.test(lab(b)) ? 0 : 1);
-    const order = btns.map((b, i) => ({ b, i })).sort((x, y) => rank(x.b) - rank(y.b) || y.i - x.i).map((x) => x.b);
-    return order.map((b, k) => { b.setAttribute("data-pplx-b", String(k)); return (b.getAttribute("aria-label") || b.innerText || b.getAttribute("data-testid") || "?").replace(/\s+/g, " ").slice(0, 25) + (b.disabled || b.getAttribute("aria-disabled") === "true" ? "(disabled)" : ""); });
-  }).catch(() => []);
-  console.log("pplx: composer buttons:", cands.join(" | ") || "koi nahi");
-  for (let k = 0; k < Math.min(cands.length, 4); k++) {
-    if (/disabled/.test(cands[k])) continue;
-    try { await page.locator('[data-pplx-b="' + k + '"]').first().click({ timeout: 1500 }); } catch (e) { try { await page.locator('[data-pplx-b="' + k + '"]').first().click({ timeout: 1500, force: true }); } catch {} }
-    await page.waitForTimeout(1800);
-    if (await startedNow(page, getSse)) return "button#" + k + " (" + cands[k] + ")";
-  }
-  try { await box.press("Enter", { timeout: 1500 }); await page.waitForTimeout(1500); if (await startedNow(page, getSse)) return "enter-again"; } catch {}
-  return "";
-}
-
 class PplxError extends Error {
   constructor(msg, kind = "error") { super(msg); this.kind = kind; }
 }
@@ -352,7 +432,12 @@ export class PplxClient {
   constructor() {
     this.browser = null; this.ctx = null; this.starting = null;
     this.active = 0; this.waiters = [];
-    this.pool = new WarmPool({ size: WARM_POOL, ttlMs: WARM_MAX_MS, label: "pplx", open: async () => { await this.ensure(); return this.open(45000); } });
+    this.pool = this.makePool();
+  }
+
+  // WarmPool band hone (closeAll) ke baad dobara nahi khulta, isliye session reset par naya pool banta hai
+  makePool() {
+    return new WarmPool({ size: WARM_POOL, ttlMs: WARM_MAX_MS, label: "pplx", open: async () => { await this.ensure(); return this.open(45000); } });
   }
 
   async ensure() {
@@ -360,21 +445,36 @@ export class PplxClient {
     if (!this.starting) this.starting = (async () => {
       const chromium = await loadChromium();
       const headless = process.env.DUCK_HEADED !== "1";
-      const launch = { headless, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] };
-      const exe = chromePath();
-      if (exe) launch.executablePath = exe; else launch.channel = "chrome";
-      this.browser = await chromium.launch(launch);
-      const ver = this.browser.version();
-      const ua = process.env.PPLX_UA ||
-        `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Safari/537.36`;
-      // Perplexity sirf phone (Android Chrome) jaisa chalta hai, desktop nahi.
-      const mobileUA = process.env.PPLX_UA ||
-        `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Mobile Safari/537.36`;
-      this.ctx = await this.browser.newContext({ userAgent: mobileUA, locale: "en-US", viewport: { width: 412, height: 915 }, screen: { width: 412, height: 915 }, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true });
-      await this.ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} try { Object.defineProperty(navigator, "platform", { get: () => "Linux armv8l" }); } catch {} }); // UA Android hai to platform bhi Linux x86_64 na dikhe (Cloudflare mismatch pakadta hai)
-      console.log("pplx: chrome ready", ver, headless ? "(headless)" : "(headed)");
+      if (!this.browser) {
+        const launch = { headless, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] };
+        const exe = chromePath();
+        if (exe) launch.executablePath = exe; else launch.channel = "chrome";
+        this.browser = await chromium.launch(launch);
+        console.log("pplx: chrome ready", this.browser.version(), headless ? "(headless)" : "(headed)");
+      }
+      await this.makeCtx();
     })().catch((e) => { this.starting = null; throw e; });
     await this.starting;
+  }
+
+  // naya browser context (naye cookies / naya anonymous session). Browser wahi rehta hai.
+  async makeCtx() {
+    const ver = this.browser.version();
+    // Perplexity sirf phone (Android Chrome) jaisa chalta hai, desktop nahi.
+    const mobileUA = process.env.PPLX_UA ||
+      `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Mobile Safari/537.36`;
+    this.ctx = await this.browser.newContext({ userAgent: mobileUA, locale: "en-US", viewport: { width: 412, height: 915 }, screen: { width: 412, height: 915 }, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true });
+    await this.ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} try { Object.defineProperty(navigator, "platform", { get: () => "Linux armv8l" }); } catch {} }); // UA Android hai to platform bhi Linux x86_64 na dikhe (Cloudflare mismatch pakadta hai)
+  }
+
+  // guest wall / bigde session ke baad: poora naya context, warm pool dobara
+  async freshSession() {
+    try { await this.pool.closeAll(); } catch {}
+    this.pool = this.makePool();
+    try { await this.ctx?.close(); } catch {}
+    this.ctx = null; this.starting = null;
+    await this.ensure();
+    if (WARM_ON) this.pool.start();
   }
 
   async slot() { if (this.active >= MAX_PAGES) await new Promise((r) => this.waiters.push(r)); this.active++; }
@@ -391,34 +491,42 @@ export class PplxClient {
     } catch {}
   }
 
-  // naya page kholo, challenge paar karo, input box tak pahuncho. Fail hone par saaf error.
+  // naya page kholo, challenge paar karo, autopilot se input box tak pahuncho (popup/promo/cookie khud). Fail hone par saaf error.
   async open(budgetMs = 60000) {
     const page = await this.ctx.newPage();
     try {
       await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: Math.min(20000, budgetMs) });
       await passChallenge(page);
-      await dismissPopups(page);
-      const box = page.locator(SEL.input).first();
-      try { await box.waitFor({ state: "visible", timeout: 10000 }); }
-      catch {
-        await dismissPopups(page); // ek aur koshish
-        try { await box.waitFor({ state: "visible", timeout: 4000 }); }
-        catch {
-          const info = await pageInfo(page);
-          console.log("pplx no-input:", info);
-          await this.debug(page, "no-input");
-          const low = info.toLowerCase();
-          if (/verify you are human|just a moment|captcha|security verification|checking your browser|cloudflare/.test(low))
-            throw new PplxError("perplexity.ai bot check (headless block?) DUCK_HEADED=1 try karo | " + info.slice(0, 380), "challenge");
-          throw new PplxError("perplexity.ai input box nahi mila | " + info.slice(0, 380), "error");
-        }
+      if (!(await autoPrepare(page, Math.min(25000, Math.max(8000, budgetMs - 5000))))) {
+        const info = await pageInfo(page);
+        console.log("pplx no-input:", info);
+        await this.debug(page, "no-input");
+        const low = info.toLowerCase();
+        if (/verify you are human|just a moment|captcha|security verification|checking your browser|cloudflare/.test(low))
+          throw new PplxError("perplexity.ai bot check (headless block?) DUCK_HEADED=1 try karo | " + info.slice(0, 380), "challenge");
+        throw new PplxError("perplexity.ai input box nahi mila | " + info.slice(0, 380), "error");
       }
-      return { page, box, t: Date.now() };
+      return { page, box: page.locator(SEL.input).first(), t: Date.now() };
     } catch (e) { try { await page.close(); } catch {} throw e; }
   }
 
-  // messages (OpenAI style) -> OpenAI chat.completion JSON string
-  async chat({ model, messages }, timeoutMs = 100000) {
+  // messages (OpenAI style) -> OpenAI chat.completion JSON string.
+  // Fail ho (guest wall / submit nahi hua / error page) aur time bacha ho to EK baar naye session ke saath khud dobara koshish.
+  async chat(args, timeoutMs = 100000) {
+    const t0 = Date.now();
+    try { return await this._chat(args, timeoutMs); }
+    catch (e) {
+      const left = timeoutMs - (Date.now() - t0);
+      if (e instanceof PplxError && e.kind !== "bad_request" && left > 35000 && process.env.PPLX_RETRY !== "0") {
+        console.log("pplx: auto-retry (" + e.kind + ") naye session ke saath, " + Math.round(left / 1000) + "s bache");
+        if (this.active === 0) { try { await this.freshSession(); } catch (e2) { console.log("pplx freshSession fail:", e2.message); } } // doosra chat chal raha ho to session mat todo
+        return await this._chat(args, left);
+      }
+      throw e;
+    }
+  }
+
+  async _chat({ model, messages }, timeoutMs = 100000) {
     const prompt = flatten(messages).slice(-MAX_PROMPT);
     if (!prompt.trim()) throw new PplxError("empty prompt", "bad_request");
     await this.ensure();
@@ -429,60 +537,40 @@ export class PplxClient {
       // pool me tayyar page ho to wahi (pool khud naya bharta hai), warna naya kholo
       if (WARM_ON) h = await this.pool.take();
       if (!h) h = await this.open(Math.min(60000, timeoutMs));
-      // input box dikh raha hai? na dikhe to popup hatao; phir bhi na dikhe to purana page chhodo aur naya kholo (warm page kharab ho sakta hai)
-      const visible = async (b) => { try { await b.waitFor({ state: "visible", timeout: 3000 }); return true; } catch { return false; } };
       await topLog(h.page, "page-mila");
-      await closeCross(h.page);
-      await topLog(h.page, "popup-hatane-ke-baad");
-      if (!(await visible(h.box))) {
-        console.log("pplx: warm page me input nahi dikha:", (await pageInfo(h.page).catch(() => "")).slice(0, 300));
+      // garam page purana ho sakta hai (popup wapas aaya / crash): autopilot dobara jaanch le; na bane to naya page
+      if (!(await autoPrepare(h.page, 15000))) {
+        console.log("pplx: warm page theek nahi hua:", (await pageInfo(h.page).catch(() => "")).slice(0, 300));
         await this.debug(h.page, "nobox");
-        await dismissPopups(h.page);
-        if (!(await visible(h.box))) {
-          try { await h.page.close(); } catch {}
-          h = null; h = await this.open(Math.max(20000, Math.min(60000, deadline - Date.now())));
-        }
+        try { await h.page.close(); } catch {}
+        h = null; h = await this.open(Math.max(20000, Math.min(60000, deadline - Date.now())));
       }
-      const { page, box } = h;
+      const { page } = h;
 
       let sse = "";
       page.on("response", async (r) => {
         try { if (/perplexity_ask/.test(r.url()) && r.request().method() === "POST") sse = await r.text(); } catch {}
       });
-      await closeCross(page); // popup ka cross pehle hata do, warna input dhak sakta hai
-      await nukeOverlays(page);
-      try { await box.click({ timeout: 6000 }); }
-      catch { // koi banner click rok raha ho to hatao, phir force se
-        await killCookieBanner(page);
-        try { await box.click({ timeout: 4000, force: true }); }
-        catch { try { await box.focus({ timeout: 3000 }); } catch { throw new PplxError("perplexity.ai input box click/focus nahi hua | " + (await pageInfo(page).catch(() => "")).slice(0, 400), "error"); } }
+      await topLog(page, "tayyar");
+      const typed = await typePrompt(page, prompt);
+      if (!typed) { await this.debug(page, "notype"); throw new PplxError("perplexity.ai prompt box me text nahi ja raha | " + (await pageInfo(page).catch(() => "")).slice(0, 380), "error"); }
+      await topLog(page, "type-ke-baad (" + typed + " akshar)");
+      const how = await sendPrompt(page, () => sse);
+      if (!how) {
+        await topLog(page, "submit-nahi-hua"); await this.debug(page, "nosend");
+        throw new PplxError("perplexity.ai submit nahi hua | " + (await pageInfo(page).catch(() => "")).slice(0, 380), "error");
       }
-      // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
-      await page.keyboard.insertText(prompt);
-      if (!(await boxText(page, box))) { // insertText box me nahi gaya: asli key events se daalo
-        console.log("pplx: insertText se box khali raha, keyboard.type se daal raha hu");
-        try { await box.click({ timeout: 3000, force: true }); } catch {}
-        await page.keyboard.type(prompt.slice(0, 3000), { delay: 0 });
-      }
-      await nukeOverlays(page); // typing ke dauran koi popup/banner aa gaya ho
-      await topLog(page, "type-ke-baad");
-      await page.keyboard.press("Enter");
-      // phone layout me Enter kabhi sirf nayi line banata hai: 1.5s me kuch shuru na ho to submit button dabao
-      await page.waitForTimeout(1500);
-      if (!sse && !(await page.locator(SEL.answer).count().catch(() => 0)) && !(await page.locator(SEL.stop).count().catch(() => 0))) {
-        const how = await trySubmit(page, box, () => sse);
-        console.log(how ? "pplx: Enter se nahi gaya, submit dabaya (" + how + ")" : "pplx: Enter se nahi gaya aur submit bhi nahi hua");
-      }
+      console.log("pplx: submit hua (" + how + ")");
 
-      await topLog(page, "submit-ke-baad");
       // jawab aane tak ruko: SSE mile ya DOM me text thehar jaye
+      const sweepSt = { tried: new Set() };
       let last = "", stable = 0, started = false, tick = 0;
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
         if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); await this.guard(net, page); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
         if (!last && tick > 0 && tick % 15 === 0) await topLog(page, "intezaar-" + Math.round(tick * 0.35) + "s"); // ~5s me ek baar
-        if (++tick % 4 === 0) await closeCross(page); // sign up popup beech me aaye to uska cross turant dabao
+        if (++tick % 5 === 0 && !last) await autoStep(page, sweepSt, { sweep: true }); // sign-in popup beech me aaye to autopilot hata de
         if (tick % 8 === 0 && !last) { // "Internal Error ... Return home" page: 100s ruk ke kya fayda, jaldi error do
           const bt = await page.innerText("body").catch(() => "");
           if (/internal error|something went wrong|return home/i.test(bt)) { console.log("pplx: internal error page mila, jaldi fail"); break; }
@@ -516,7 +604,7 @@ export class PplxClient {
     console.log("pplx: guest limit / login wall:", String(text).trim().slice(0, 120));
     await this.debug(page, "wall");
     try { await this.ctx.clearCookies(); } catch {} // naya anonymous session agli baar
-    this.pool.flush(); // purani session wale warm pages hatao
+    if (WARM_ON) this.pool.flush(); // purani session wale warm pages hatao
     throw new PplxError("perplexity.ai guest limit (login/sign up maang raha hai). Thodi der baad try karo", "ratelimit");
   }
 
