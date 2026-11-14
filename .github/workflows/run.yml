@@ -16,8 +16,9 @@ jobs:
           RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # repo Variable (Settings -> Variables): DUCK_HEADED=1 ho to chrome xvfb me headed chalega
-          DUCK_HEADED: ${{ vars.DUCK_HEADED }}
+          # Cloudflare headless Chrome ko pakadta hai, isliye ab DEFAULT headed (xvfb me asli chrome window).
+          # Band karna ho to repo Variable (Settings -> Variables) DUCK_HEADED=0 rakho.
+          DUCK_HEADED: ${{ vars.DUCK_HEADED || '1' }}
           # agla runner 90s par start (pehle 120s): naye runner ko 3+3+3 pages tayyar karne ka time mile, overlap lamba
           NEXT_AT_MS: 90000
           # naya runner 15s me apne 3+3+3 pages tayyar kare, tab hi requests le
