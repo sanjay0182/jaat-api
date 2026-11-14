@@ -47,7 +47,23 @@ const CROSS_SEL = [
   '[aria-modal="true"] button[aria-label*="close" i]', '[aria-modal="true"] button[aria-label*="dismiss" i]',
   'button[aria-label="Close" i]', 'button[aria-label*="close" i][class*="modal" i]', '[data-testid*="close" i]', '[data-testid*="dismiss" i]',
 ].join(", ");
+// cookie / sign up banner (role=dialog, fixed, input ke upar aa jata hai aur click rok deta hai): button dabao, na hate to DOM se hata do
+async function killCookieBanner(page) {
+  try {
+    const dlg = page.locator('[role="dialog"]');
+    if (!(await dlg.count())) return false;
+    const btn = dlg.getByRole("button", { name: /accept|agree|allow|reject|decline|necessary|got it|^ok$|close|dismiss|not now|maybe later/i }).first();
+    if (await btn.count()) { try { await btn.click({ timeout: 1500 }); } catch {} }
+    await page.waitForTimeout(250);
+    if (await dlg.count()) {
+      await page.evaluate(() => { document.querySelectorAll('[role="dialog"]').forEach((d) => { if (/cookie|pixels|sign up|log ?in|create (an )?account|continue with/i.test(d.innerText || "")) d.remove(); }); });
+      return true;
+    }
+    return true;
+  } catch { return false; }
+}
 async function closeCross(page) {
+  if (await killCookieBanner(page)) return true;
   try {
     const b = page.locator(CROSS_SEL).first();
     if (await b.count()) { await b.click({ timeout: 800 }); return true; }
@@ -56,7 +72,7 @@ async function closeCross(page) {
 }
 // Cloudflare "Just a moment..." challenge: kuch der ruko (headed Chrome me aksar khud paas ho jata hai),
 // aur turnstile checkbox dikhe to use click karo. True = page aage badh gaya.
-async function passChallenge(page, ms = 22000) {
+async function passChallenge(page, ms = 45000) {
   const isChallenge = async () => {
     const title = (await page.title().catch(() => "")).toLowerCase();
     if (/just a moment|attention required|security verification/.test(title)) return true;
@@ -66,10 +82,21 @@ async function passChallenge(page, ms = 22000) {
   if (!(await isChallenge())) return true;
   console.log("pplx: cloudflare challenge mila, intezaar...");
   const end = Date.now() + ms;
-  let tries = 0;
+  let tries = 0, reloads = 0, lastReload = Date.now();
   while (Date.now() < end) {
     await page.waitForTimeout(2000);
     if (!(await isChallenge())) { console.log("pplx: challenge paas"); await page.waitForTimeout(1500); return true; }
+    // 3 page ek saath khule hon to koi ek challenge paar kar leta hai aur cf_clearance cookie poore context me aa jati hai:
+    // baaki atke pages ko reload karo, wo turant paas ho jate hain (ya 12s se atka ho to bhi ek baar naya challenge)
+    try {
+      const cleared = (await page.context().cookies()).some((c) => c.name === "cf_clearance");
+      if (reloads < 3 && ((cleared && Date.now() - lastReload > 2500) || Date.now() - lastReload > 12000)) {
+        reloads++; lastReload = Date.now();
+        console.log("pplx: challenge page reload (" + reloads + (cleared ? ", cf_clearance mili" : "") + ")");
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+        continue;
+      }
+    } catch {}
     if (tries++ % 2 === 0) { // turnstile iframe ke andar checkbox dabao
       for (const f of page.frames()) {
         if (!/challenges\.cloudflare\.com|turnstile/.test(f.url())) continue;
@@ -228,7 +255,7 @@ export class PplxClient {
       const mobileUA = process.env.PPLX_UA ||
         `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver} Mobile Safari/537.36`;
       this.ctx = await this.browser.newContext({ userAgent: mobileUA, locale: "en-US", viewport: { width: 412, height: 915 }, screen: { width: 412, height: 915 }, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true });
-      await this.ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} });
+      await this.ctx.addInitScript(() => { try { Object.defineProperty(navigator, "webdriver", { get: () => undefined }); } catch {} try { Object.defineProperty(navigator, "platform", { get: () => "Linux armv8l" }); } catch {} }); // UA Android hai to platform bhi Linux x86_64 na dikhe (Cloudflare mismatch pakadta hai)
       console.log("pplx: chrome ready", ver, headless ? "(headless)" : "(headed)");
     })().catch((e) => { this.starting = null; throw e; });
     await this.starting;
@@ -293,7 +320,11 @@ export class PplxClient {
         try { if (/perplexity_ask/.test(r.url()) && r.request().method() === "POST") sse = await r.text(); } catch {}
       });
       await closeCross(page); // popup ka cross pehle hata do, warna input dhak sakta hai
-      await box.click();
+      try { await box.click({ timeout: 6000 }); }
+      catch { // koi banner click rok raha ho to hatao, phir force se
+        await killCookieBanner(page);
+        try { await box.click({ timeout: 4000, force: true }); } catch { await box.focus(); }
+      }
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
       await page.keyboard.press("Enter");
