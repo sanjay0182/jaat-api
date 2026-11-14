@@ -51,7 +51,7 @@ async function nukeOverlays(page) {
       const inputSel = '#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea';
       const bad = /better in the app|open in app|get the app|download the app|cookie|pixels, sdks|sign up|log ?in\b|create (an )?account|continue with (google|apple|email)|this session is private|decline optional|single sign-on/i;
       const vw = window.innerWidth, vh = window.innerHeight;
-      let n = 0;
+      let n = 0; const gone = [];
       for (const el of Array.from(document.querySelectorAll("body *"))) {
         if (!el.isConnected || el.matches("html, body, script, style")) continue;
         const cs = getComputedStyle(el);
@@ -62,7 +62,7 @@ async function nukeOverlays(page) {
         const txt = (el.innerText || "").trim();
         const full = r.width >= vw * 0.9 && r.height >= vh * 0.9;
         const blocker = !txt && full && cs.zIndex !== "auto" && cs.pointerEvents !== "none"; // khali full-screen parda
-        if ((txt && bad.test(txt)) || blocker) { el.remove(); n++; }
+        if ((txt && bad.test(txt)) || blocker) { gone.push(el.tagName.toLowerCase() + ":" + (txt || "(khali parda)").replace(/\s+/g, " ").slice(0, 40)); el.remove(); n++; }
       }
       document.body.style.pointerEvents = "";
       document.body.style.overflow = "";
@@ -70,8 +70,8 @@ async function nukeOverlays(page) {
       document.body.removeAttribute("data-scroll-locked");
       document.querySelectorAll("[inert]").forEach((e) => e.removeAttribute("inert"));
       document.querySelectorAll('body > [aria-hidden="true"]').forEach((e) => { if (e.querySelector(inputSel)) e.removeAttribute("aria-hidden"); });
-      return n;
-    });
+      return gone;
+    }).then((g) => { if (g && g.length) console.log("pplx: overlay hataye:", g.join(" | ")); return g ? g.length : 0; });
   } catch { return 0; }
 }
 // sign up / login popup ka cross (X): popup ke andar ka close button turant dabao. Kabhi error nahi fenkta.
@@ -167,6 +167,20 @@ async function pageInfo(page) {
   return `url=${page.url()} | title=${title} | ce=${n.ce} ta=${n.ta} input=${n.inp} | body: ${body}`;
 }
 
+// page abhi kya dikha raha hai: title, sabse upar ka text, aur screen ke upar/beech/neeche (x-center) pe sabse upar kaun sa element hai + fixed overlays
+async function topLog(page, tag) {
+  try {
+    const i = await page.evaluate(() => {
+      const d = (el) => el ? el.tagName.toLowerCase() + (el.getAttribute("aria-label") ? "[" + el.getAttribute("aria-label") + "]" : "") + ":" + (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 50) : "-";
+      const vw = innerWidth, vh = innerHeight;
+      const pts = [[vw / 2, 8], [vw / 2, vh * 0.3], [vw / 2, vh * 0.6], [vw / 2, vh - 8]];
+      const fixed = Array.from(document.querySelectorAll("body *")).filter((e) => getComputedStyle(e).position === "fixed" && e.getBoundingClientRect().width > vw * 0.4).slice(0, 4).map(d);
+      return { top: pts.map(([x, y]) => d(document.elementFromPoint(x, y))), fixed, text: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160) };
+    });
+    const title = await page.title().catch(() => "");
+    console.log("pplx top [" + tag + "]: title=" + title + " | text: " + i.text + " | upar/30%/60%/neeche: " + i.top.join(" || ") + " | fixed: " + (i.fixed.join(" || ") || "-"));
+  } catch {}
+}
 // prompt box me text gaya ya nahi (Lexical editor kabhi insertText nahi pakadta)
 async function boxText(page, box) {
   try { return ((await box.innerText({ timeout: 1500 }).catch(() => "")) || (await box.inputValue({ timeout: 1500 }).catch(() => "")) || "").trim(); } catch { return ""; }
@@ -377,6 +391,20 @@ export class PplxClient {
       // pool me tayyar page ho to wahi (pool khud naya bharta hai), warna naya kholo
       if (WARM_ON) h = await this.pool.take();
       if (!h) h = await this.open(Math.min(60000, timeoutMs));
+      // input box dikh raha hai? na dikhe to popup hatao; phir bhi na dikhe to purana page chhodo aur naya kholo (warm page kharab ho sakta hai)
+      const visible = async (b) => { try { await b.waitFor({ state: "visible", timeout: 3000 }); return true; } catch { return false; } };
+      await topLog(h.page, "page-mila");
+      await closeCross(h.page);
+      await topLog(h.page, "popup-hatane-ke-baad");
+      if (!(await visible(h.box))) {
+        console.log("pplx: warm page me input nahi dikha:", (await pageInfo(h.page).catch(() => "")).slice(0, 300));
+        await this.debug(h.page, "nobox");
+        await dismissPopups(h.page);
+        if (!(await visible(h.box))) {
+          try { await h.page.close(); } catch {}
+          h = null; h = await this.open(Math.max(20000, Math.min(60000, deadline - Date.now())));
+        }
+      }
       const { page, box } = h;
 
       let sse = "";
@@ -388,7 +416,8 @@ export class PplxClient {
       try { await box.click({ timeout: 6000 }); }
       catch { // koi banner click rok raha ho to hatao, phir force se
         await killCookieBanner(page);
-        try { await box.click({ timeout: 4000, force: true }); } catch { await box.focus(); }
+        try { await box.click({ timeout: 4000, force: true }); }
+        catch { try { await box.focus({ timeout: 3000 }); } catch { throw new PplxError("perplexity.ai input box click/focus nahi hua | " + (await pageInfo(page).catch(() => "")).slice(0, 400), "error"); } }
       }
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
@@ -398,6 +427,7 @@ export class PplxClient {
         await page.keyboard.type(prompt.slice(0, 3000), { delay: 0 });
       }
       await nukeOverlays(page); // typing ke dauran koi popup/banner aa gaya ho
+      await topLog(page, "type-ke-baad");
       await page.keyboard.press("Enter");
       // phone layout me Enter kabhi sirf nayi line banata hai: 1.5s me kuch shuru na ho to submit button dabao
       await page.waitForTimeout(1500);
@@ -406,12 +436,14 @@ export class PplxClient {
         console.log(how ? "pplx: Enter se nahi gaya, submit dabaya (" + how + ")" : "pplx: Enter se nahi gaya aur submit bhi nahi hua");
       }
 
+      await topLog(page, "submit-ke-baad");
       // jawab aane tak ruko: SSE mile ya DOM me text thehar jaye
       let last = "", stable = 0, started = false, tick = 0;
       while (Date.now() < deadline) {
         await page.waitForTimeout(350);
         const net = answerFromSSE(sse);
         if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); await this.guard(net, page); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
+        if (!last && tick > 0 && tick % 15 === 0) await topLog(page, "intezaar-" + Math.round(tick * 0.35) + "s"); // ~5s me ek baar
         if (++tick % 4 === 0) await closeCross(page); // sign up popup beech me aaye to uska cross turant dabao
         if (tick % 8 === 0 && !last) { // "Internal Error ... Return home" page: 100s ruk ke kya fayda, jaldi error do
           const bt = await page.innerText("body").catch(() => "");
@@ -427,6 +459,7 @@ export class PplxClient {
         else stable = 0;
         last = txt;
       }
+      await topLog(page, started ? "partial" : "timeout");
       await this.debug(page, started ? "partial" : "timeout");
       if (last) { await this.guard(last, page); return completion(model || DEFAULT_MODEL, cleanDom(last)); } // adhura hi sahi
       const info = await pageInfo(page).catch(() => "");
