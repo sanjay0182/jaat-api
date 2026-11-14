@@ -37,9 +37,42 @@ const SEL = {
 async function dismissPopups(page) {
   try { await page.keyboard.press("Escape"); } catch {}
   await closeCross(page);
-  for (const name of [/^accept( all)?$/i, /^i agree$/i, /^got it$/i, /^continue as guest$/i, /^stay logged out$/i, /^maybe later$/i, /^close$/i, /^skip$/i]) {
+  for (const name of [/^accept( all)?$/i, /^i agree$/i, /^got it$/i, /^decline optional$/i, /^continue as guest$/i, /^stay logged out$/i, /^maybe later$/i, /^close$/i, /^skip$/i]) {
     try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 1500 }); } catch {}
   }
+  await nukeOverlays(page); // button se na hate (ya bina label ka X ho) to seedha DOM se hatao
+}
+// Phone par input ke upar fixed overlays aate hain: "Search like never before / better in the app" (X bina label ka),
+// cookie banner, login popup, "This session is private". Ye click rok dete hain (log: submit button fail: Timeout exceeded).
+// Inhe seedha DOM se hata do, aur popup ke lagaye pointer-events/inert/scroll-lock bhi khol do. Kabhi error nahi fenkta.
+async function nukeOverlays(page) {
+  try {
+    return await page.evaluate(() => {
+      const inputSel = '#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea';
+      const bad = /better in the app|open in app|get the app|download the app|cookie|pixels, sdks|sign up|log ?in\b|create (an )?account|continue with (google|apple|email)|this session is private|decline optional|single sign-on/i;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let n = 0;
+      for (const el of Array.from(document.querySelectorAll("body *"))) {
+        if (!el.isConnected || el.matches("html, body, script, style")) continue;
+        const cs = getComputedStyle(el);
+        if (cs.position !== "fixed") continue;
+        if (el.matches(inputSel) || el.querySelector(inputSel)) continue; // composer (input wala) kabhi nahi hatana
+        const r = el.getBoundingClientRect();
+        if (r.width < vw * 0.4 || r.height < 30) continue;
+        const txt = (el.innerText || "").trim();
+        const full = r.width >= vw * 0.9 && r.height >= vh * 0.9;
+        const blocker = !txt && full && cs.zIndex !== "auto" && cs.pointerEvents !== "none"; // khali full-screen parda
+        if ((txt && bad.test(txt)) || blocker) { el.remove(); n++; }
+      }
+      document.body.style.pointerEvents = "";
+      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
+      document.body.removeAttribute("data-scroll-locked");
+      document.querySelectorAll("[inert]").forEach((e) => e.removeAttribute("inert"));
+      document.querySelectorAll('body > [aria-hidden="true"]').forEach((e) => { if (e.querySelector(inputSel)) e.removeAttribute("aria-hidden"); });
+      return n;
+    });
+  } catch { return 0; }
 }
 // sign up / login popup ka cross (X): popup ke andar ka close button turant dabao. Kabhi error nahi fenkta.
 const CROSS_SEL = [
@@ -63,7 +96,9 @@ async function killCookieBanner(page) {
   } catch { return false; }
 }
 async function closeCross(page) {
+  const killed = await nukeOverlays(page);
   if (await killCookieBanner(page)) return true;
+  if (killed) return true;
   try {
     const b = page.locator(CROSS_SEL).first();
     if (await b.count()) { await b.click({ timeout: 800 }); return true; }
@@ -130,6 +165,35 @@ async function pageInfo(page) {
   const body = (await page.innerText("body").catch(() => "")).replace(/\s+/g, " ").slice(0, 220);
   const n = await page.evaluate(() => ({ ce: document.querySelectorAll('[contenteditable]').length, ta: document.querySelectorAll('textarea').length, inp: document.querySelectorAll('input').length })).catch(() => ({}));
   return `url=${page.url()} | title=${title} | ce=${n.ce} ta=${n.ta} input=${n.inp} | body: ${body}`;
+}
+
+// prompt box me text gaya ya nahi (Lexical editor kabhi insertText nahi pakadta)
+async function boxText(page, box) {
+  try { return ((await box.innerText({ timeout: 1500 }).catch(() => "")) || (await box.inputValue({ timeout: 1500 }).catch(() => "")) || "").trim(); } catch { return ""; }
+}
+// send button dabao: pehle aria-label wala (force), phir composer ka aakhri enabled button (mic ke baad wala arrow), phir Enter
+async function trySubmit(page, box) {
+  await nukeOverlays(page);
+  const sels = 'button[aria-label*="submit" i], button[aria-label*="send" i], button[type="submit"]';
+  try {
+    const sb = page.locator(sels).first();
+    if (await sb.count()) { await sb.click({ timeout: 2000, force: true }); return "button"; }
+  } catch (e) { console.log("pplx: submit button fail:", String((e && e.message) || e).split("\n")[0].slice(0, 100)); }
+  try {
+    const ok = await page.evaluate(() => {
+      const ed = document.querySelector('#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea');
+      if (!ed) return false;
+      let el = ed;
+      for (let i = 0; i < 7 && el; i++, el = el.parentElement) {
+        const btns = Array.from(el.querySelectorAll("button")).filter((b) => !b.disabled && b.getAttribute("aria-disabled") !== "true" && b.offsetParent !== null);
+        if (btns.length >= 2) { btns[btns.length - 1].click(); return true; }
+      }
+      return false;
+    });
+    if (ok) return "dom-last-button";
+  } catch {}
+  try { await box.press("Enter", { timeout: 1500 }); return "enter-again"; } catch {}
+  return "";
 }
 
 class PplxError extends Error {
@@ -320,6 +384,7 @@ export class PplxClient {
         try { if (/perplexity_ask/.test(r.url()) && r.request().method() === "POST") sse = await r.text(); } catch {}
       });
       await closeCross(page); // popup ka cross pehle hata do, warna input dhak sakta hai
+      await nukeOverlays(page);
       try { await box.click({ timeout: 6000 }); }
       catch { // koi banner click rok raha ho to hatao, phir force se
         await killCookieBanner(page);
@@ -327,15 +392,18 @@ export class PplxClient {
       }
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
+      if (!(await boxText(page, box))) { // insertText box me nahi gaya: asli key events se daalo
+        console.log("pplx: insertText se box khali raha, keyboard.type se daal raha hu");
+        try { await box.click({ timeout: 3000, force: true }); } catch {}
+        await page.keyboard.type(prompt.slice(0, 3000), { delay: 0 });
+      }
+      await nukeOverlays(page); // typing ke dauran koi popup/banner aa gaya ho
       await page.keyboard.press("Enter");
       // phone layout me Enter kabhi sirf nayi line banata hai: 1.5s me kuch shuru na ho to submit button dabao
       await page.waitForTimeout(1500);
       if (!sse && !(await page.locator(SEL.answer).count().catch(() => 0)) && !(await page.locator(SEL.stop).count().catch(() => 0))) {
-        try {
-          const sb = page.locator('button[aria-label*="submit" i], button[aria-label*="send" i], button[type="submit"]').first();
-          if (await sb.count()) { await sb.click({ timeout: 2000 }); console.log("pplx: Enter se nahi gaya, submit button dabaya"); }
-          else console.log("pplx: Enter se nahi gaya aur submit button bhi nahi mila");
-        } catch (e) { console.log("pplx: submit button fail:", String((e && e.message) || e).split("\n")[0].slice(0, 100)); }
+        const how = await trySubmit(page, box);
+        console.log(how ? "pplx: Enter se nahi gaya, submit dabaya (" + how + ")" : "pplx: Enter se nahi gaya aur submit bhi nahi hua");
       }
 
       // jawab aane tak ruko: SSE mile ya DOM me text thehar jaye
@@ -345,6 +413,10 @@ export class PplxClient {
         const net = answerFromSSE(sse);
         if (net && sse) { console.log("pplx: jawab SSE se (saaf)"); await this.guard(net, page); return completion(model || DEFAULT_MODEL, net.trim()); } // SSE poora aate hi turant
         if (++tick % 4 === 0) await closeCross(page); // sign up popup beech me aaye to uska cross turant dabao
+        if (tick % 8 === 0 && !last) { // "Internal Error ... Return home" page: 100s ruk ke kya fayda, jaldi error do
+          const bt = await page.innerText("body").catch(() => "");
+          if (/internal error|something went wrong|return home/i.test(bt)) { console.log("pplx: internal error page mila, jaldi fail"); break; }
+        }
         await hideChips(page);
         const els = page.locator(SEL.answer);
         const n = await els.count().catch(() => 0);
@@ -358,8 +430,9 @@ export class PplxClient {
       await this.debug(page, started ? "partial" : "timeout");
       if (last) { await this.guard(last, page); return completion(model || DEFAULT_MODEL, cleanDom(last)); } // adhura hi sahi
       const info = await pageInfo(page).catch(() => "");
-      console.log("pplx timeout: sse=" + (sse ? sse.length + " bytes" : "nahi") + " | " + info);
-      throw new PplxError("perplexity.ai timeout | sse=" + (sse ? sse.length + "B" : "nahi") + " | " + info.slice(0, 450), "timeout");
+      const sseHead = sse ? " [" + sse.slice(0, 200).replace(/\s+/g, " ") + "]" : "";
+      console.log("pplx timeout: sse=" + (sse ? sse.length + " bytes" : "nahi") + sseHead + " | " + info);
+      throw new PplxError("perplexity.ai timeout | sse=" + (sse ? sse.length + "B" + sseHead : "nahi") + " | " + info.slice(0, 450), "timeout");
     } finally {
       try { await h?.page?.close(); } catch {}
       this.free();
