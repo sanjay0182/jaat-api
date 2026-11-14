@@ -95,10 +95,34 @@ async function killCookieBanner(page) {
     return true;
   } catch { return false; }
 }
+// "Search like never before / It's better in the app" screen ka X: insaan ki tarah asli tap karo (sirf chhupane se app ki state nahi badalti)
+async function closePromo(page) {
+  try {
+    const found = await page.evaluate(() => {
+      const vw = innerWidth;
+      for (const el of Array.from(document.querySelectorAll("body *"))) {
+        const cs = getComputedStyle(el);
+        if (cs.position !== "fixed" || cs.display === "none") continue;
+        if (!/better in the app|search like never before/i.test(el.innerText || "")) continue;
+        if (el.getBoundingClientRect().width < vw * 0.5) continue;
+        const btns = Array.from(el.querySelectorAll("button, [role=button]")).filter((b) => b.offsetParent !== null && !(b.innerText || "").trim());
+        btns.sort((a, b) => { const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect(); return (ra.top - rb.top) || (rb.right - ra.right); }); // sabse upar-daayen = X
+        if (btns[0]) { btns[0].setAttribute("data-pplx-x", "1"); return true; }
+      }
+      return false;
+    });
+    if (!found) return false;
+    await page.locator('[data-pplx-x="1"]').first().click({ timeout: 1500 });
+    console.log("pplx: app-promo ka X dabaya");
+    await page.waitForTimeout(400);
+    return true;
+  } catch { return false; }
+}
 async function closeCross(page) {
   for (const name of [/^got it$/i, /^decline optional$/i]) { // cookie banner ka asli button pehle (React khud hata leta hai)
     try { const b = page.getByRole("button", { name }).first(); if (await b.count()) await b.click({ timeout: 800 }); } catch {}
   }
+  await closePromo(page); // cookie ke baad wala promo screen: uska X asli tap se
   const killed = await nukeOverlays(page);
   if (await killCookieBanner(page)) return true;
   if (killed) return true;
@@ -188,28 +212,39 @@ async function topLog(page, tag) {
 async function boxText(page, box) {
   try { return ((await box.innerText({ timeout: 1500 }).catch(() => "")) || (await box.inputValue({ timeout: 1500 }).catch(() => "")) || "").trim(); } catch { return ""; }
 }
-// send button dabao: pehle aria-label wala (force), phir composer ka aakhri enabled button (mic ke baad wala arrow), phir Enter
-async function trySubmit(page, box) {
+// kya jawab/search shuru ho gaya (url /search|/session, SSE, stop button ya answer block)
+async function startedNow(page, getSse) {
+  if (getSse && getSse()) return true;
+  if (/\/(search|session)\//.test(page.url())) return true;
+  if (await page.locator(SEL.stop).count().catch(() => 0)) return true;
+  return (await page.locator(SEL.answer).count().catch(() => 0)) > 0;
+}
+// send button dabao. Composer ke saare buttons log me dikhata hai, phir ek-ek asli click karke dekhta hai ki submit hua ya nahi
+async function trySubmit(page, box, getSse) {
   await nukeOverlays(page);
-  const sels = 'button[aria-label*="submit" i], button[aria-label*="send" i], button[type="submit"]';
-  try {
-    const sb = page.locator(sels).first();
-    if (await sb.count()) { await sb.click({ timeout: 2000, force: true }); return "button"; }
-  } catch (e) { console.log("pplx: submit button fail:", String((e && e.message) || e).split("\n")[0].slice(0, 100)); }
-  try {
-    const ok = await page.evaluate(() => {
-      const ed = document.querySelector('#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea');
-      if (!ed) return false;
-      let el = ed;
-      for (let i = 0; i < 7 && el; i++, el = el.parentElement) {
-        const btns = Array.from(el.querySelectorAll("button")).filter((b) => !b.disabled && b.getAttribute("aria-disabled") !== "true" && b.offsetParent !== null);
-        if (btns.length >= 2) { btns[btns.length - 1].click(); return true; }
-      }
-      return false;
-    });
-    if (ok) return "dom-last-button";
-  } catch {}
-  try { await box.press("Enter", { timeout: 1500 }); return "enter-again"; } catch {}
+  const cands = await page.evaluate(() => {
+    const ed = document.querySelector('#ask-input, [data-lexical-editor="true"], [contenteditable="true"], [role="textbox"], textarea');
+    if (!ed) return [];
+    let el = ed, btns = [];
+    for (let i = 0; i < 7 && el; i++, el = el.parentElement) {
+      btns = Array.from(el.querySelectorAll("button")).filter((b) => b.offsetParent !== null);
+      if (btns.length >= 2) break;
+    }
+    document.querySelectorAll("[data-pplx-b]").forEach((b) => b.removeAttribute("data-pplx-b"));
+    // pehle submit/send label wale, phir baaki aakhri se pehle (mic ke baad wala arrow aakhri hota hai)
+    const lab = (b) => (b.getAttribute("aria-label") || "") + " " + (b.innerText || "");
+    const rank = (b) => (/submit|send/i.test(lab(b)) ? 0 : 1);
+    const order = btns.map((b, i) => ({ b, i })).sort((x, y) => rank(x.b) - rank(y.b) || y.i - x.i).map((x) => x.b);
+    return order.map((b, k) => { b.setAttribute("data-pplx-b", String(k)); return (b.getAttribute("aria-label") || b.innerText || b.getAttribute("data-testid") || "?").replace(/\s+/g, " ").slice(0, 25) + (b.disabled || b.getAttribute("aria-disabled") === "true" ? "(disabled)" : ""); });
+  }).catch(() => []);
+  console.log("pplx: composer buttons:", cands.join(" | ") || "koi nahi");
+  for (let k = 0; k < Math.min(cands.length, 4); k++) {
+    if (/disabled/.test(cands[k])) continue;
+    try { await page.locator('[data-pplx-b="' + k + '"]').first().click({ timeout: 1500 }); } catch (e) { try { await page.locator('[data-pplx-b="' + k + '"]').first().click({ timeout: 1500, force: true }); } catch {} }
+    await page.waitForTimeout(1800);
+    if (await startedNow(page, getSse)) return "button#" + k + " (" + cands[k] + ")";
+  }
+  try { await box.press("Enter", { timeout: 1500 }); await page.waitForTimeout(1500); if (await startedNow(page, getSse)) return "enter-again"; } catch {}
   return "";
 }
 
@@ -435,7 +470,7 @@ export class PplxClient {
       // phone layout me Enter kabhi sirf nayi line banata hai: 1.5s me kuch shuru na ho to submit button dabao
       await page.waitForTimeout(1500);
       if (!sse && !(await page.locator(SEL.answer).count().catch(() => 0)) && !(await page.locator(SEL.stop).count().catch(() => 0))) {
-        const how = await trySubmit(page, box);
+        const how = await trySubmit(page, box, () => sse);
         console.log(how ? "pplx: Enter se nahi gaya, submit dabaya (" + how + ")" : "pplx: Enter se nahi gaya aur submit bhi nahi hua");
       }
 
