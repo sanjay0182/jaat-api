@@ -328,6 +328,15 @@ export class PplxClient {
       // lamba prompt: type() dheema hota hai, isliye insertText (paste jaisa)
       await page.keyboard.insertText(prompt);
       await page.keyboard.press("Enter");
+      // phone layout me Enter kabhi sirf nayi line banata hai: 1.5s me kuch shuru na ho to submit button dabao
+      await page.waitForTimeout(1500);
+      if (!sse && !(await page.locator(SEL.answer).count().catch(() => 0)) && !(await page.locator(SEL.stop).count().catch(() => 0))) {
+        try {
+          const sb = page.locator('button[aria-label*="submit" i], button[aria-label*="send" i], button[type="submit"]').first();
+          if (await sb.count()) { await sb.click({ timeout: 2000 }); console.log("pplx: Enter se nahi gaya, submit button dabaya"); }
+          else console.log("pplx: Enter se nahi gaya aur submit button bhi nahi mila");
+        } catch (e) { console.log("pplx: submit button fail:", String((e && e.message) || e).split("\n")[0].slice(0, 100)); }
+      }
 
       // jawab aane tak ruko: SSE mile ya DOM me text thehar jaye
       let last = "", stable = 0, started = false, tick = 0;
@@ -348,7 +357,9 @@ export class PplxClient {
       }
       await this.debug(page, started ? "partial" : "timeout");
       if (last) { await this.guard(last, page); return completion(model || DEFAULT_MODEL, cleanDom(last)); } // adhura hi sahi
-      throw new PplxError("perplexity.ai timeout", "timeout");
+      const info = await pageInfo(page).catch(() => "");
+      console.log("pplx timeout: sse=" + (sse ? sse.length + " bytes" : "nahi") + " | " + info);
+      throw new PplxError("perplexity.ai timeout | sse=" + (sse ? sse.length + "B" : "nahi") + " | " + info.slice(0, 450), "timeout");
     } finally {
       try { await h?.page?.close(); } catch {}
       this.free();
