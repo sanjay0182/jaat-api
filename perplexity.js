@@ -12,7 +12,7 @@
 // Sirf runner.js import karta hai. Akele test ke liye:
 //   node perplexity.js "hello"        (DUCK_HEADED=1 ho to xvfb-run ke saath)
 
-import { execFileSync } from "node:child_process";
+import { loadChromium } from "./pw.js";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { WarmPool } from "./warmpool.js";
@@ -96,15 +96,6 @@ class PplxError extends Error {
 }
 
 // ---- playwright load (lazy) ---------------------------------------------------
-async function loadPlaywright() {
-  for (let i = 0; i < 15; i++) {
-    try { return await import("playwright-core"); } catch {}
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  console.log("pplx: playwright-core install ho raha hai...");
-  execFileSync("npm", ["i", "--no-audit", "--no-fund", "--no-save", "playwright-core"], { stdio: "inherit" });
-  return await import("playwright-core");
-}
 
 function chromePath() {
   for (const p of [process.env.DUCK_CHROME_PATH, "/usr/bin/google-chrome", "/opt/google/chrome/chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"])
@@ -210,7 +201,7 @@ export class PplxClient {
   async ensure() {
     if (this.ctx) return;
     if (!this.starting) this.starting = (async () => {
-      const { chromium } = await loadPlaywright();
+      const chromium = await loadChromium();
       const headless = process.env.DUCK_HEADED !== "1";
       const launch = { headless, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] };
       const exe = chromePath();

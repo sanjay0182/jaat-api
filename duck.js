@@ -11,7 +11,7 @@
 // Sirf runner.js isse import karta hai. Akele test ke liye:
 //   node duck.js "hello"            (DUCK_HEADED=1 ho to xvfb-run ke saath chalao)
 
-import { execFileSync } from "node:child_process";
+import { loadChromium } from "./pw.js";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -273,16 +273,6 @@ function classify(text, status) {
 }
 
 // ---- playwright load (lazy: sirf duck request aane par) -------------------------
-async function loadPlaywright() {
-  // workflow peeche install kar raha hota hai - thoda ruk ke dobara try karo
-  for (let i = 0; i < 15; i++) {
-    try { return await import("playwright-core"); } catch {}
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  console.log("duck: playwright-core install ho raha hai...");
-  execFileSync("npm", ["i", "--no-audit", "--no-fund", "--no-save", "playwright-core"], { stdio: "inherit" });
-  return await import("playwright-core");
-}
 
 function chromePath() {
   for (const p of [process.env.DUCK_CHROME_PATH, "/usr/bin/google-chrome", "/opt/google/chrome/chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"])
@@ -375,7 +365,7 @@ export class DuckClient {
   async ensure() {
     if (this.ctx) return;
     if (!this.starting) this.starting = (async () => {
-      const { chromium } = await loadPlaywright();
+      const chromium = await loadChromium();
       const headless = process.env.DUCK_HEADED !== "1";
       const launch = { headless, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] };
       const exe = chromePath();

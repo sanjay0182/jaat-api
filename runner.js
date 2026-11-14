@@ -7,6 +7,10 @@ import { VeniceClient } from "./venice.js";
 import { PROVIDERS as FREE_PROVIDERS } from "./free-fallback.mjs";
 import { callFree } from "./free-call.mjs";
 
+// ek provider ki galti poore runner ko na girae (har provider independent)
+process.on("unhandledRejection", (e) => console.log("unhandledRejection:", String((e && e.message) || e).slice(0, 200)));
+process.on("uncaughtException", (e) => console.log("uncaughtException:", String((e && e.message) || e).slice(0, 200)));
+
 const W = process.env.WORKER;
 // har runner ki apni pehchaan: worker isse jaanta hai ki kitne runner sun rahe hain (handover ke liye)
 const RID = (process.env.GITHUB_RUN_ID || "local") + "-" + Math.random().toString(36).slice(2, 7);
@@ -41,7 +45,7 @@ const VENICE_TIMEOUT_MS = Number(process.env.VENICE_TIMEOUT_MS || 240000);
 const start = Date.now();
 duck.warmup();  // duck: 3 page pehle se (DUCK_WARM_POOL)
 pplx.warmup();  // perplexity: 3 page pehle se (PPLX_WARM_POOL)
-venice.warmUp(); // venice: 3 page pehle se (VENICE_WARM_POOL) // chrome + duck.ai page pehle se tayyar (background)
+try { venice.warmUp(); } catch (e) { console.log("venice warmUp fail:", e.message); } // venice: 3 page pehle se (VENICE_WARM_POOL) // chrome + duck.ai page pehle se tayyar (background)
 // duck.ai ka asli model catalog (page ke network response se) worker ko bhejo. Na mile to hardcoded fallback chalta hai.
 // Runner har ~3 min rotate hota hai, isliye har run me ek baar (start ke baad) publish; lamba run ho to 10 min me dobara.
 async function publishDuckModels() {
@@ -223,7 +227,7 @@ async function handle({ id, provider, name, body, stream }) {
 // Naya runner pehle apne 3+3+3 pages tayyar kare (max WARM_WAIT_MS = 15s), tab requests le.
 // Is beech purana runner (jo abhi chal raha hai) requests sambhalta hai, isliye handover me koi cold page nahi.
 const WARM_WAIT_MS = Number(process.env.WARM_WAIT_MS || 15000);
-await Promise.all([duck.warmReady(WARM_WAIT_MS), pplx.warmReady(WARM_WAIT_MS), venice.warmReady(WARM_WAIT_MS)]).catch(() => {});
+await Promise.allSettled([duck.warmReady(WARM_WAIT_MS), pplx.warmReady(WARM_WAIT_MS), venice.warmReady(WARM_WAIT_MS)]);
 console.log("runner: pages tayyar, requests lena shuru (", Date.now() - start, "ms )");
 
 let lastDispCheck = 0;
@@ -255,7 +259,5 @@ while (true) {
 // chal rahi requests poori hone do, phir band
 while (inflight > 0) await sleep(200);
 clearInterval(modelRefresh);
-await duck.close();
-await pplx.close();
-await venice.close();
+await Promise.allSettled([duck.close(), pplx.close(), venice.close()]);
 process.exit(0);

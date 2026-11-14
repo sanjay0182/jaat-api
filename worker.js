@@ -68,7 +68,7 @@ export class Hub {
     });
     this.win = new Map();
     this.progress = new Map(); // job id -> live provider progress (venice)
-    this.cancelled = new Set(); // job id -> cancel maanga gaya (runner yahan dekh ke rukta hai)
+    this.cancelled = new Map(); // job id -> cancel maanga gaya (runner yahan dekh ke rukta hai)
     this.activeVenice = new Map(); // api key id -> abhi chal rahi venice job id (nayi aaye to purani cancel)
     this.vrun = new Set();   // runner ko di gayi (chal rahi) venice jobs ke id: sab runners mila ke max VENICE_MAX_PAR
     this.runners = new Map(); // runner id -> aakhri baar /next kab aaya (handover ke liye: agla runner sun raha hai ya nahi)
@@ -271,7 +271,7 @@ export class Hub {
     if (p === "/cancel") {
       const { id } = await req.json().catch(() => ({}));
       if (!id) return Response.json({ ok: false, error: "id chahiye" }, { status: 400 });
-      this.cancelled.add(id);
+      this.cancelled.set(id, Date.now());
       // queue me pada ho (abhi runner tak gaya hi nahi) to seedha hata do, waiter ko turant "cancelled" do
       this.cleanup(id);
       this.waiters.get(id)?.(JSON.stringify({ error: "cancel kiya gaya", _jaat_kind: "cancelled" }));
@@ -282,6 +282,7 @@ export class Hub {
     // runner har progress tick ke beech me ye poochhta hai: ye id cancel hui kya
     if (p === "/cancel-check") {
       const { id } = await req.json().catch(() => ({}));
+      for (const [k, t] of this.cancelled) if (Date.now() - t > 5 * 60e3) this.cancelled.delete(k); // purani entries saaf
       const c = id && this.cancelled.has(id);
       if (c) this.cancelled.delete(id);
       return Response.json({ cancelled: !!c });
@@ -354,7 +355,7 @@ export class Hub {
     const cancelPrev = this.env.VENICE_CANCEL_PREV === "1";
     if (cancelPrev && provider === "venice" && keyId) {
       const prev = this.activeVenice.get(keyId);
-      if (prev) { this.cancelled.add(prev); this.cleanup(prev); this.waiters.get(prev)?.(JSON.stringify({ error: "nayi request aayi, purani cancel", _jaat_kind: "cancelled" })); }
+      if (prev) { this.cancelled.set(prev, Date.now()); this.cleanup(prev); this.waiters.get(prev)?.(JSON.stringify({ error: "nayi request aayi, purani cancel", _jaat_kind: "cancelled" })); }
     }
     const { id, done } = await this.enqueue(provider, body, name, false, meta);
     if (cancelPrev && provider === "venice" && keyId) this.activeVenice.set(keyId, id);
@@ -372,7 +373,7 @@ export class Hub {
       if (v !== undefined) { out = v; break; }
       if (this.queue.some(j => j.id === id)) this.ensureRunner(); // abhi tak kisi runner ne uthayi hi nahi
     }
-    this.cleanup(id); this.cancelled.delete(id);
+    this.cleanup(id); // cancelled yahan nahi hatate: runner /cancel-check se dekhta hai (pehle yahin delete ho jata tha, runner ko cancel kabhi milta nahi tha)
     if (cancelPrev && provider === "venice" && keyId && this.activeVenice.get(keyId) === id) this.activeVenice.delete(keyId);
     return out;
   }
@@ -753,8 +754,9 @@ async function handle(req, env) {
       data: [
         { id: "jaat-default", object: "model", created: 0, owned_by: "jaat" },
         ...[...new Set([...DUCK_MODELS, ...liveModels.map(x => typeof x === "string" ? x : x.id).filter(Boolean)])].map(id => ({ ...(liveById.get(id) || {}), id, object: "model", created: 0, owned_by: "duck.ai" })),
-        { id: "pplx-auto", object: "model", created: 0, owned_by: "perplexity.ai" },
-        { id: "jaatvenice", object: "model", created: 0, owned_by: "jaatvenice" },
+        ...DUCK_ALIASES.map(id => ({ id, object: "model", created: 0, owned_by: "duck.ai" })),
+        ...PPLX_MODELS.map(id => ({ id, object: "model", created: 0, owned_by: "perplexity.ai" })),
+        ...["jaatvenice", "venice"].map(id => ({ id, object: "model", created: 0, owned_by: "jaatvenice" })),
         ...FREE_PROVIDERS.map(p => ({ id: p.name, object: "model", created: 0, owned_by: new URL(p.base).hostname })),
       ],
     });
